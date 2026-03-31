@@ -16,18 +16,18 @@
 
 ## v0.1 Phases
 
-### Phase 0 — Foundations `[ ]`
+### Phase 0 — Foundations `[x]`
 
 **Goal:** Everything other phases import exists. Daemon skeleton runs. Config is loadable.
 Must be merged to `main` before any worktree branches off.
 
-- `[ ]` `pyproject.toml` — project metadata, dependencies (pyyaml, websockets, httpx, huggingface_hub, textual, pydantic)
-- `[ ]` `core/__init__.py`
-- `[ ]` `core/config.py` — load and validate `~/.lmagent-plus/config.yaml`, create defaults on first run
-- `[ ]` `core/errors.py` — error hierarchy: `LMAgentError > RuntimeError, ToolError, BackendError, ConfigError, IPCError`
-- `[ ]` `core/daemon.py` — asyncio WebSocket server skeleton on `config.daemon.port` (accepts connections, echo back)
-- `[ ]` `core/__main__.py` — entry point: `python -m core` starts the daemon
-- `[ ]` `tests/conftest.py` — shared pytest fixtures (temp config dir, mock config)
+- `[x]` `pyproject.toml` — project metadata, dependencies (pyyaml, websockets, httpx, huggingface_hub, textual, pydantic)
+- `[x]` `core/__init__.py`
+- `[x]` `core/config.py` — load and validate `~/.lmagent-plus/config.yaml`, create defaults on first run
+- `[x]` `core/errors.py` — error hierarchy: `LMAgentError > RuntimeError, ToolError, BackendError, ConfigError, IPCError`
+- `[x]` `core/daemon.py` — asyncio WebSocket server skeleton on `config.daemon.port` (accepts connections, echo back)
+- `[x]` `core/__main__.py` — entry point: `python -m core` starts the daemon
+- `[x]` `tests/conftest.py` — shared pytest fixtures (temp config dir, mock config)
 
 **Exit criterion:** `python -m core` starts, accepts a WebSocket connection, and logs startup correctly.
 

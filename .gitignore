@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+.venv/
+venv/
+env/
+
+# Env / secrets
+.env
+.env.*
+*.env
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# llama.cpp binaries
+bin/
+llama.cpp/
+
+# Modèles
+*.gguf
+*.bin
+*.safetensors
+
+# User data (toujours dans ~/.lmagent-plus/)
+data/
+cache/
+
+# Fichiers locaux non versionnés
+TODO.md
+CLAUDE.md

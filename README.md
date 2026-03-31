@@ -135,5 +135,3 @@ See [PLAN.md](PLAN.md) for the current roadmap and phase status.
 
 ## License
 See [LICENCE.md](LICENCE.md)
-
-TBD

@@ -58,10 +58,10 @@ LMAgent-Plus ships with **tested agent presets** that actually behave correctly 
 
 ```bash
 # Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/your-org/lmagent-plus/main/installer/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/3L0935/LMagent-plus/main/installer/install.sh | bash
 
 # Windows
-irm https://raw.githubusercontent.com/your-org/lmagent-plus/main/installer/install.ps1 | iex
+irm https://raw.githubusercontent.com/3L0935/LMagent-plus/installer/install.ps1 | iex
 ```
 
 The installer will:
@@ -134,5 +134,6 @@ See [PLAN.md](PLAN.md) for the current roadmap and phase status.
 ---
 
 ## License
+See [LICENCE.md](LICENCE.md)
 
 TBD

@@ -74,19 +74,19 @@ Can run in parallel with Phase 1 (`feat/agent-loop` worktree).
 
 ---
 
-### Phase 3 — Personas `[ ]`
+### Phase 3 — Personas `[x]`
 
 **Goal:** Agents have distinct YAML-defined behaviors. System prompt is injected correctly.
 After Phase 2 merges. Parallel with Phases 4 and 5 (`feat/personas` worktree).
 
-- `[ ]` `personas/_base.yaml` — annotated template
-- `[ ]` `personas/coder.yaml`
-- `[ ]` `personas/writer.yaml`
-- `[ ]` `personas/research.yaml`
-- `[ ]` `personas/assistant.yaml`
-- `[ ]` `core/persona_loader.py` — load persona YAML, validate fields, resolve model references
-- `[ ]` Hook persona system prompt into `core/agent.py`'s plugin pipeline
-- `[ ]` Dynamic substitution of `{tools_list}` and `{memory_context}` in system prompts
+- `[x]` `personas/_base.yaml` — annotated template
+- `[x]` `personas/coder.yaml`
+- `[x]` `personas/writer.yaml`
+- `[x]` `personas/research.yaml`
+- `[x]` `personas/assistant.yaml`
+- `[x]` `core/persona_loader.py` — load persona YAML, validate fields, resolve model references
+- `[x]` Hook persona system prompt into `core/agent.py`'s plugin pipeline
+- `[x]` Dynamic substitution of `{tools_list}` and `{memory_context}` in system prompts
 
 **Exit criterion:** Switching personas changes available tools and system prompt behavior.
 

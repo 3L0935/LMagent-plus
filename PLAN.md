@@ -33,39 +33,39 @@ Must be merged to `main` before any worktree branches off.
 
 ---
 
-### Phase 1 — Runtime `[ ]`
+### Phase 1 — Runtime `[x]`
 
 **Goal:** llama.cpp runs internally. A model loads. A prompt gets a response.
 Can run in parallel with Phase 2 (`feat/runtime` worktree).
 
-- `[ ]` `core/runtime/backend_detector.py` — OS / GPU vendor / driver detection (see docs/RUNTIME.md for full spec)
-- `[ ]` `core/runtime/llama_manager.py` — llama.cpp binary download (scrape GitHub releases API), llama-server lifecycle
-- `[ ]` `core/runtime/model_manager.py` — model download from HuggingFace, local catalog management
-- `[ ]` `installer/models/recommended.yaml` — initial tested model list with hardware requirements
-- `[ ]` `tests/test_runtime.py` — mocked subprocess and HTTP calls
+- `[x]` `core/runtime/backend_detector.py` — OS / GPU vendor / driver detection (see docs/RUNTIME.md for full spec)
+- `[x]` `core/runtime/llama_manager.py` — llama.cpp binary download (scrape GitHub releases API), llama-server lifecycle
+- `[x]` `core/runtime/model_manager.py` — model download from HuggingFace, local catalog management
+- `[x]` `installer/models/recommended.yaml` — initial tested model list with hardware requirements
+- `[x]` `tests/test_runtime.py` — mocked subprocess and HTTP calls
 
 **Exit criterion:** `llama-server` starts automatically with a downloaded model, local API responds to a prompt.
 
 ---
 
-### Phase 2 — Agent loop + tool use + IPC `[ ]`
+### Phase 2 — Agent loop + tool use + IPC `[x]`
 
 **Goal:** An agent receives an instruction, calls tools, chains actions. The daemon exposes this via IPC.
 Can run in parallel with Phase 1 (`feat/agent-loop` worktree).
 **Critical path**: Phases 3, 4, 5 are blocked until this merges.
 
-- `[ ]` `core/tool_registry.py` — tool registry, strict schema validation, tool discovery
-- `[ ]` `core/tools/bash.py`
-- `[ ]` `core/tools/file_ops.py`
-- `[ ]` `core/tools/git.py`
-- `[ ]` `core/agent.py` — agent loop: call LLM → parse tool calls → execute → loop.
+- `[x]` `core/tool_registry.py` — tool registry, strict schema validation, tool discovery
+- `[x]` `core/tools/bash.py`
+- `[x]` `core/tools/file_ops.py`
+- `[x]` `core/tools/git.py`
+- `[x]` `core/agent.py` — agent loop: call LLM → parse tool calls → execute → loop.
   **Must define a plugin pipeline** for system prompt construction:
   `list[Callable[[], str]] → system_prompt` so Phases 3 and 4 can hook in without modifying core loop logic.
-- `[ ]` `core/router.py` — backend selector local vs cloud. Cloud-only initially; local backend added after Phase 1 merges.
-- `[ ]` `core/ipc_protocol.py` — JSON-RPC message types for the WebSocket IPC
-- `[ ]` Wire `core/daemon.py` WebSocket server to dispatch IPC messages to the agent loop
-- `[ ]` `tests/test_agent.py` — mocked LLM responses, verify tool call parsing and loop behavior
-- `[ ]` `tests/test_tool_registry.py`
+- `[x]` `core/router.py` — backend selector local vs cloud. Cloud-only initially; local backend added after Phase 1 merges.
+- `[x]` `core/ipc_protocol.py` — JSON-RPC message types for the WebSocket IPC
+- `[x]` Wire `core/daemon.py` WebSocket server to dispatch IPC messages to the agent loop
+- `[x]` `tests/test_agent.py` — mocked LLM responses, verify tool call parsing and loop behavior
+- `[x]` `tests/test_tool_registry.py`
 
 **Exit criterion:** Three base use cases work without hallucinated tool calls:
 1. "List files in current directory" → uses bash

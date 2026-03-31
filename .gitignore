@@ -48,3 +48,4 @@ cache/
 # Fichiers locaux non versionnés
 TODO.md
 CLAUDE.md
+*.lock

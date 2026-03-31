@@ -4,9 +4,7 @@
 
 ```
 lmagent-plus/
-├── CLAUDE.md                  # project overview + file references
 ├── PLAN.md                    # phases + statuses + worktree strategy
-├── TODO.md                    # tasks for the current phase
 ├── pyproject.toml             # project metadata and dependencies
 │
 ├── docs/                      # technical documentation

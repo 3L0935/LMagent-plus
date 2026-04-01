@@ -639,7 +639,7 @@ class LMAgentTUI(App[None]):
             raw = text.strip().lower()
             if raw in ("", "skip", "s"):
                 self._wizard_data.setdefault("models_to_download", [])
-                self._wizard_step = 7
+                self._wizard_step = 5
                 await self._wizard_show_confirm()
                 return
             try:

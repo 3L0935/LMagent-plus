@@ -502,11 +502,12 @@ class LMAgentTUI(App[None]):
     # ── Setup wizard ──────────────────────────────────────────────────────────
     # Steps:
     #   0  routing   (local / cloud / auto)  — warns about shell env for API keys
-    #   1  backend   (vulkan / cuda / …)
-    #   2  language
-    #   3  interests
-    #   4  models    (skipped when routing=cloud)
-    #   5  confirm
+    #   1  backend          (vulkan / cuda / …)
+    #   2  idle_unload      (seconds, 0=never — skipped for cloud routing)
+    #   3  language
+    #   4  interests
+    #   5  models           (skipped when routing=cloud)
+    #   6  confirm
 
     async def _start_setup_wizard(self) -> None:
         if self._streaming:
@@ -603,40 +604,70 @@ class LMAgentTUI(App[None]):
                 )
                 return
             self._wizard_data["backend"] = choice
-            self._wizard_step = 2
+            if self._wizard_data.get("routing") == "cloud":
+                self._wizard_data["idle_unload"] = 0
+                self._wizard_step = 3
+                self._write_system(
+                    f"  [dim]Backend →[/dim] [cyan]{choice}[/cyan]\n\n"
+                    "[bold]Step 3/6 — Language[/bold]\n"
+                    "  Preferred language for agent responses\n"
+                    "  [yellow]>[/yellow]  [dim]Enter = English[/dim]"
+                )
+            else:
+                self._wizard_step = 2
+                self._write_system(
+                    f"  [dim]Backend →[/dim] [cyan]{choice}[/cyan]\n\n"
+                    "[bold]Step 3/6 — Idle unload[/bold]\n"
+                    "  Seconds of inactivity before the model is unloaded from memory.\n"
+                    "  Frees VRAM/RAM when the daemon is idle — 0 = never unload.\n"
+                    "  [yellow]>[/yellow]  [dim]Enter = 0 (never)[/dim]"
+                )
+
+        elif step == 2:  # idle_unload
+            raw = text.strip()
+            try:
+                idle = int(raw) if raw else 0
+                if idle < 0:
+                    raise ValueError
+            except ValueError:
+                self._write_system("[red]Enter a positive integer (seconds) or 0:[/red]")
+                return
+            self._wizard_data["idle_unload"] = idle
+            self._wizard_step = 3
+            idle_label = f"{idle}s" if idle else "never"
             self._write_system(
-                f"  [dim]Backend →[/dim] [cyan]{choice}[/cyan]\n\n"
-                "[bold]Step 3/5 — Language[/bold]\n"
+                f"  [dim]Idle unload →[/dim] [cyan]{idle_label}[/cyan]\n\n"
+                "[bold]Step 4/6 — Language[/bold]\n"
                 "  Preferred language for agent responses\n"
                 "  [yellow]>[/yellow]  [dim]Enter = English[/dim]"
             )
 
-        elif step == 2:  # language
+        elif step == 3:  # language
             self._wizard_data["language"] = text.strip() or "English"
-            self._wizard_step = 3
+            self._wizard_step = 4
             self._write_system(
                 f"  [dim]Language →[/dim] [cyan]{escape(self._wizard_data['language'])}[/cyan]\n\n"
-                "[bold]Step 4/5 — Interests[/bold]\n"
+                "[bold]Step 5/6 — Interests[/bold]\n"
                 "  Comma-separated topics  (e.g. coding, writing, science)\n"
                 "  [yellow]>[/yellow]  [dim]Enter = general[/dim]"
             )
 
-        elif step == 3:  # interests
+        elif step == 4:  # interests
             self._wizard_data["interests"] = text.strip() or "general"
-            self._wizard_step = 4
+            self._wizard_step = 5
             if self._wizard_data.get("routing") == "cloud":
                 # Skip model step for cloud-only users
                 self._wizard_data.setdefault("models_to_download", [])
-                self._wizard_step = 5
+                self._wizard_step = 6
                 await self._wizard_show_confirm()
             else:
                 await self._wizard_show_model_step()
 
-        elif step == 4:  # model selection
+        elif step == 5:  # model selection
             raw = text.strip().lower()
             if raw in ("", "skip", "s"):
                 self._wizard_data.setdefault("models_to_download", [])
-                self._wizard_step = 5
+                self._wizard_step = 6
                 await self._wizard_show_confirm()
                 return
             try:
@@ -659,10 +690,10 @@ class LMAgentTUI(App[None]):
             self._wizard_data["models_to_download"] = selected
             if not self._wizard_data.get("default_model") and selected:
                 self._wizard_data["default_model"] = selected[0]
-            self._wizard_step = 5
+            self._wizard_step = 6
             await self._wizard_show_confirm()
 
-        elif step == 5:  # confirm
+        elif step == 6:  # confirm
             if text.strip().lower() in ("n", "no"):
                 self._write_system("[dim]Setup cancelled — no changes made.[/dim]")
             else:
@@ -671,21 +702,21 @@ class LMAgentTUI(App[None]):
             self._wizard_step   = 0
 
     async def _wizard_show_model_step(self) -> None:
-        """Step 5/5 — show downloaded models or suggest catalog picks."""
+        """Step 6/6 — show downloaded models or suggest catalog picks."""
         try:
             from core.runtime.model_manager import _load_catalog, list_downloaded_models
             downloaded = list_downloaded_models()
             catalog    = _load_catalog()
         except Exception as exc:
             self._write_error(f"Could not read model catalog: {escape(str(exc))}")
-            self._wizard_step = 5
+            self._wizard_step = 6
             await self._wizard_show_confirm()
             return
 
         downloaded_ids = {m["id"] for m in downloaded}
         self._wizard_catalog_picks = self._pick_catalog_models(catalog, downloaded_ids)
 
-        lines = ["\n[bold]Step 5/5 — Models[/bold]"]
+        lines = ["\n[bold]Step 6/6 — Models[/bold]"]
 
         if downloaded:
             names   = "  ".join(f"[cyan]{m['id']}[/cyan]" for m in downloaded)
@@ -743,6 +774,7 @@ class LMAgentTUI(App[None]):
     async def _wizard_show_confirm(self) -> None:
         routing   = self._wizard_data.get("routing", "local")
         backend   = self._wizard_data.get("backend", "cpu")
+        idle      = self._wizard_data.get("idle_unload", 0)
         language  = self._wizard_data.get("language", "English")
         interests = self._wizard_data.get("interests", "general")
         to_dl     = self._wizard_data.get("models_to_download", [])
@@ -751,6 +783,9 @@ class LMAgentTUI(App[None]):
         lines = ["\n[bold]Confirm setup:[/bold]"]
         lines.append(f"  Routing:   [cyan]{routing}[/cyan]")
         lines.append(f"  Backend:   [cyan]{backend}[/cyan]")
+        if routing in ("local", "auto"):
+            idle_label = f"{idle}s" if idle else "never"
+            lines.append(f"  Idle unload: [cyan]{idle_label}[/cyan]")
         lines.append(f"  Language:  [cyan]{escape(language)}[/cyan]")
         lines.append(f"  Interests: [cyan]{escape(interests)}[/cyan]")
         if to_dl:
@@ -769,6 +804,7 @@ class LMAgentTUI(App[None]):
 
         routing       = self._wizard_data.get("routing", "local")
         backend       = self._wizard_data.get("backend", "cpu")
+        idle_unload   = self._wizard_data.get("idle_unload", 0)
         language      = self._wizard_data.get("language", "English")
         interests     = self._wizard_data.get("interests", "general")
         to_dl         = self._wizard_data.get("models_to_download", [])
@@ -781,6 +817,7 @@ class LMAgentTUI(App[None]):
                 raw = yaml.safe_load(f) or {}
             local = raw.setdefault("backends", {}).setdefault("local", {})
             local["backend"] = backend
+            local["idle_unload_timeout"] = idle_unload
             if default_model:
                 local["default_model"] = default_model
             raw.setdefault("routing", {})["default"] = routing

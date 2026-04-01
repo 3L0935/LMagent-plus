@@ -98,7 +98,7 @@ async def run_daemon(
                 await websocket.send(err.model_dump_json())
                 return
 
-            if local_manager is not None and not local_manager.is_loaded:
+            if local_manager is not None and not local_manager.is_loaded and config.routing.default in ("local", "auto"):
                 model_name = config.backends.local.default_model or "local model"
                 await websocket.send(
                     ChatEvent(params={"type": "status", "message": f"Loading {model_name}…"}).model_dump_json()

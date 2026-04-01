@@ -218,6 +218,7 @@ class LMAgentTUI(App[None]):
         self._wizard_step = 0
         self._wizard_data: dict[str, Any] = {}
         self._wizard_backends: list[str] = []
+        self._wizard_catalog_picks: list[dict] = []
         super().__init__()
 
     # ── Composition ────────────────────────────────────────────────────────────
@@ -251,12 +252,13 @@ class LMAgentTUI(App[None]):
         self.query_one("#completions", Static).display = False
         text = event.value.strip()
         event.input.clear()
-        if not text:
-            return
 
-        # Wizard intercept (highest priority)
+        # Wizard intercept before empty-text guard — Enter = accept default
         if self._wizard_active:
             await self._handle_wizard_input(text)
+            return
+
+        if not text:
             return
 
         # Download confirmation intercept
@@ -510,7 +512,7 @@ class LMAgentTUI(App[None]):
 
         self._write_system(
             "[bold cyan]Setup wizard[/bold cyan]  —  "
-            "press Enter to accept defaults, Ctrl+C to quit\n"
+            "Enter = accept default  ·  Ctrl+C = quit\n"
         )
 
         try:
@@ -538,15 +540,16 @@ class LMAgentTUI(App[None]):
                 available.append(name)
         self._write_system("\n".join(lines))
 
-        self._wizard_backends = available
-        self._wizard_data = {"_best": best}
-        self._wizard_step = 0
-        self._wizard_active = True
+        self._wizard_backends  = available
+        self._wizard_data      = {"_best": best}
+        self._wizard_catalog_picks = []
+        self._wizard_step      = 0
+        self._wizard_active    = True
 
         self._write_system(
-            f"\n[bold]Step 1/3 — Backend[/bold]\n"
+            f"\n[bold]Step 1/4 — Backend[/bold]\n"
             f"  Available: {', '.join(available)}\n"
-            f"  [yellow]Enter backend[/yellow]  [dim](Enter = {best})[/dim]:"
+            f"  [yellow]>[/yellow]  [dim]Enter = {best}[/dim]"
         )
 
     async def _handle_wizard_input(self, text: str) -> None:
@@ -564,10 +567,10 @@ class LMAgentTUI(App[None]):
             self._wizard_data["backend"] = choice
             self._wizard_step = 1
             self._write_system(
-                f"  Backend: [cyan]{choice}[/cyan]\n\n"
-                "[bold]Step 2/3 — Language[/bold]\n"
-                "  Preferred language for responses\n"
-                "  [yellow]Enter language[/yellow]  [dim](Enter = English)[/dim]:"
+                f"  [dim]Backend →[/dim] [cyan]{choice}[/cyan]\n\n"
+                "[bold]Step 2/4 — Language[/bold]\n"
+                "  Preferred language for agent responses\n"
+                "  [yellow]>[/yellow]  [dim]Enter = English[/dim]"
             )
 
         elif step == 1:  # language
@@ -575,49 +578,168 @@ class LMAgentTUI(App[None]):
             self._wizard_data["language"] = lang
             self._wizard_step = 2
             self._write_system(
-                f"  Language: [cyan]{escape(lang)}[/cyan]\n\n"
-                "[bold]Step 3/3 — Interests[/bold]\n"
+                f"  [dim]Language →[/dim] [cyan]{escape(lang)}[/cyan]\n\n"
+                "[bold]Step 3/4 — Interests[/bold]\n"
                 "  Comma-separated topics  (e.g. coding, writing, science)\n"
-                "  [yellow]Enter interests[/yellow]  [dim](Enter = general)[/dim]:"
+                "  [yellow]>[/yellow]  [dim]Enter = general[/dim]"
             )
 
         elif step == 2:  # interests
-            interests = text.strip() or "general"
-            self._wizard_data["interests"] = interests
+            self._wizard_data["interests"] = text.strip() or "general"
             self._wizard_step = 3
-            backend  = self._wizard_data["backend"]
-            language = self._wizard_data["language"]
-            self._write_system(
-                f"  Interests: [cyan]{escape(interests)}[/cyan]\n\n"
-                "[bold]Confirm setup:[/bold]\n"
-                f"  Backend:   [cyan]{backend}[/cyan]\n"
-                f"  Language:  [cyan]{escape(language)}[/cyan]\n"
-                f"  Interests: [cyan]{escape(interests)}[/cyan]\n"
-                "[yellow]Apply? [y/n][/yellow]:"
-            )
+            await self._wizard_show_model_step()
 
-        elif step == 3:  # confirm
-            if text.lower() in ("y", "yes"):
+        elif step == 3:  # model selection
+            raw = text.strip().lower()
+            if raw in ("", "skip", "s"):
+                self._wizard_data.setdefault("models_to_download", [])
+                self._wizard_step = 4
+                await self._wizard_show_confirm()
+                return
+            try:
+                indices = [int(x) - 1 for x in raw.split()]
+            except ValueError:
+                self._write_system(
+                    "[red]Invalid input.[/red]  "
+                    "Enter numbers (e.g. [bold]1[/bold] or [bold]1 3[/bold]) "
+                    "or [bold]skip[/bold]:"
+                )
+                return
+            picks = self._wizard_catalog_picks
+            selected: list[str] = []
+            for i in indices:
+                if 0 <= i < len(picks):
+                    selected.append(picks[i]["id"])
+                else:
+                    self._write_system(f"[red]No model #{i + 1}.[/red]")
+                    return
+            self._wizard_data["models_to_download"] = selected
+            if not self._wizard_data.get("default_model") and selected:
+                self._wizard_data["default_model"] = selected[0]
+            self._wizard_step = 4
+            await self._wizard_show_confirm()
+
+        elif step == 4:  # confirm
+            if text.strip().lower() in ("y", "yes"):
                 await self._apply_wizard()
             else:
                 self._write_system("[dim]Setup cancelled — no changes made.[/dim]")
             self._wizard_active = False
             self._wizard_step   = 0
 
-    async def _apply_wizard(self) -> None:
-        """Write config.yaml + global/preferences.md from wizard answers."""
-        import yaml
+    async def _wizard_show_model_step(self) -> None:
+        """Step 4/4 — show downloaded models or suggest catalog picks."""
+        try:
+            from core.runtime.model_manager import _load_catalog, list_downloaded_models
+            downloaded = list_downloaded_models()
+            catalog    = _load_catalog()
+        except Exception as exc:
+            self._write_error(f"Could not read model catalog: {escape(str(exc))}")
+            self._wizard_step = 4
+            await self._wizard_show_confirm()
+            return
 
+        downloaded_ids = {m["id"] for m in downloaded}
+
+        # Always build picks from catalog (excluding already downloaded)
+        self._wizard_catalog_picks = self._pick_catalog_models(catalog, downloaded_ids)
+
+        lines = ["\n[bold]Step 4/4 — Models[/bold]"]
+
+        if downloaded:
+            names = "  ".join(f"[cyan]{m['id']}[/cyan]" for m in downloaded)
+            default = downloaded[0]["id"]
+            self._wizard_data["default_model"] = default
+            self._wizard_data.setdefault("models_to_download", [])
+            lines.append(f"  Already downloaded: {names}")
+            lines.append(f"  [dim]Default → {default}[/dim]")
+            if self._wizard_catalog_picks:
+                lines.append("")
+                lines.append("  Add more (optional):")
+        else:
+            lines.append("  No models found. Suggested picks:")
+
+        for i, m in enumerate(self._wizard_catalog_picks, 1):
+            size = f"~{m.get('size_gb', '?')} GB"
+            tags = ", ".join(m.get("tags", []))
+            lines.append(
+                f"  [dim]{i}.[/dim] [cyan]{m['id']}[/cyan]  {size}"
+                f"  [dim]{escape(m.get('description', ''))}  [{tags}][/dim]"
+            )
+
+        if self._wizard_catalog_picks:
+            lines.append("")
+            lines.append(
+                "  Enter number(s) to download (e.g. [bold]1[/bold] or [bold]1 3[/bold]),"
+                "  [bold]skip[/bold] or Enter to skip:"
+            )
+        else:
+            lines.append("  [dim]All catalog models already downloaded.[/dim]")
+            lines.append("  [yellow]>[/yellow]  [dim]Enter = continue[/dim]")
+
+        self._write_system("\n".join(lines))
+
+    def _pick_catalog_models(
+        self, catalog: list[dict], downloaded_ids: set[str]
+    ) -> list[dict]:
+        """Return up to 4 representative models not yet downloaded."""
+        # One per category: tiny-general, general, reasoning, code
+        priorities = [
+            lambda m: "tiny" in m.get("tags", []) and "general" in m.get("tags", []),
+            lambda m: "general" in m.get("tags", []) and "tiny" not in m.get("tags", []),
+            lambda m: "reasoning" in m.get("tags", []),
+            lambda m: "code" in m.get("tags", []) and "large" not in m.get("tags", []),
+        ]
+        picks: list[dict] = []
+        seen = set(downloaded_ids)
+        for pred in priorities:
+            for m in catalog:
+                if m["id"] not in seen and pred(m):
+                    picks.append(m)
+                    seen.add(m["id"])
+                    break
+        return picks[:4]
+
+    async def _wizard_show_confirm(self) -> None:
         backend   = self._wizard_data["backend"]
         language  = self._wizard_data["language"]
         interests = self._wizard_data["interests"]
+        to_dl     = self._wizard_data.get("models_to_download", [])
+        default   = self._wizard_data.get("default_model", "")
 
-        # Update backends.local.backend + routing.default in config.yaml
+        lines = ["\n[bold]Confirm setup:[/bold]"]
+        lines.append(f"  Backend:   [cyan]{backend}[/cyan]")
+        lines.append(f"  Language:  [cyan]{escape(language)}[/cyan]")
+        lines.append(f"  Interests: [cyan]{escape(interests)}[/cyan]")
+        if to_dl:
+            lines.append(f"  Download:  [cyan]{', '.join(to_dl)}[/cyan]")
+        else:
+            lines.append("  Models:    [dim]no download[/dim]")
+        if default:
+            lines.append(f"  Default:   [cyan]{default}[/cyan]")
+        lines.append("")
+        lines.append("  [yellow]>[/yellow]  [bold]y[/bold] = apply   [bold]n[/bold] = cancel")
+        self._write_system("\n".join(lines))
+
+    async def _apply_wizard(self) -> None:
+        """Write config.yaml + global/preferences.md, then trigger downloads."""
+        import yaml
+
+        backend       = self._wizard_data["backend"]
+        language      = self._wizard_data["language"]
+        interests     = self._wizard_data["interests"]
+        to_dl         = self._wizard_data.get("models_to_download", [])
+        default_model = self._wizard_data.get("default_model", "")
+
+        # Update config.yaml
         from core.config import CONFIG_PATH
         try:
             with CONFIG_PATH.open() as f:
                 raw = yaml.safe_load(f) or {}
-            raw.setdefault("backends", {}).setdefault("local", {})["backend"] = backend
+            local = raw.setdefault("backends", {}).setdefault("local", {})
+            local["backend"] = backend
+            if default_model:
+                local["default_model"] = default_model
             raw.setdefault("routing", {})["default"] = "local"
             with CONFIG_PATH.open("w") as f:
                 yaml.dump(raw, f, default_flow_style=False, allow_unicode=True)
@@ -632,20 +754,32 @@ class LMAgentTUI(App[None]):
             "# User preferences\n\n"
             "## Communication\n\n"
             f"- Preferred language: {language}\n\n"
-            "## Technical\n\n"
-            f"- Backend: {backend}\n\n"
             "## Workflow\n\n"
             f"- Interests: {interests}\n",
             encoding="utf-8",
         )
 
-        self._write_system(
-            "[green]Setup complete.[/green]\n"
-            f"  config.yaml — backend=[cyan]{backend}[/cyan], routing=[cyan]local[/cyan]\n"
+        status_lines = [
+            "[green]Setup complete.[/green]",
+            f"  config.yaml — backend=[cyan]{backend}[/cyan], routing=[cyan]local[/cyan]",
+        ]
+        if default_model:
+            status_lines.append(f"  default model → [cyan]{default_model}[/cyan]")
+        status_lines.append(
             f"  preferences.md — language=[cyan]{escape(language)}[/cyan], "
-            f"interests=[cyan]{escape(interests)}[/cyan]\n"
-            "  [dim]Restart the daemon to use the new backend.[/dim]"
+            f"interests=[cyan]{escape(interests)}[/cyan]"
         )
+        if to_dl:
+            status_lines.append(
+                f"  Starting download of [cyan]{', '.join(to_dl)}[/cyan]…"
+            )
+        else:
+            status_lines.append("  [dim]Restart the daemon to use the new backend.[/dim]")
+        self._write_system("\n".join(status_lines))
+
+        # Kick off downloads (daemon hot-reload if running, silent fail if not)
+        for model_id in to_dl:
+            asyncio.create_task(self._download_and_reload(model_id))
 
     # ── Model download + hot-reload ───────────────────────────────────────────
 

@@ -182,16 +182,16 @@ Blocked until Phase 5 ships. Requires Rust + Node toolchains.
 
 ---
 
-### Phase 5.2 — CLI model management + JIT `[~]`
+### Phase 5.2 — CLI model management + JIT `[x]`
 
 **Goal:** Full model lifecycle from the CLI — discover, download, switch, no daemon restart.
 Blocked until Phase 5.1 ships.
 
 - `[x]` JIT model load/unload — daemon starts without loading a model; loads on first request, unloads after idle timeout
-- `[ ]` `/model <id>` on a non-downloaded catalog model → prompt to download, then hot-reload llama-server
-- `[ ]` `/hf [query]` — HuggingFace model search with download; recommended catalog models shown first (tags, VRAM/RAM requirements)
-- `[ ]` `/setup` wizard — guided backend switch (rocm, vulkan, cpu…), user profile questions (language, interests → injected into system prompt as `global/preferences.md`)
-- `[ ]` Multi-agent tab view — switch between active agents in the TUI when an agent delegates
+- `[x]` `/model <id>` on a non-downloaded catalog model → prompt to download, then hot-reload llama-server
+- `[x]` `/hf [query]` — HuggingFace model search with download; recommended catalog models shown first (tags, VRAM/RAM requirements)
+- `[x]` `/setup` wizard — guided backend switch (rocm, vulkan, cpu…), user profile questions (language, interests → injected into system prompt as `global/preferences.md`)
+- `[x]` Multi-agent tab view — switch between active agents in the TUI when an agent delegates
 
 **Exit criterion:** User can discover, download and use a new local model entirely from the TUI without touching config files.
 
@@ -233,3 +233,7 @@ Blocked until Phase 6 (reuses Svelte components).
 
 - **2026-04-01** — Phase 5.2 started. JIT load/unload complete. Bug fixed: `_idle_watcher` self-cancelled via `unload()` → `_cancel_idle_watcher()` — `_stop_sync` never ran. Fix: skip `task.cancel()` when caller IS the idle task.
 - **2026-04-01** — Memory write system added (outside original phase scope): `update_memory` tool + `core/app_prompt.py` global system hook. Agents can now persist preferences/patterns without knowing filesystem paths. Decision logic for `global_preferences` vs `learned` embedded in system prompt with examples.
+- **2026-04-01** — Phase 5.2 complete. `/model <id>` download flow, `/hf [query]` HuggingFace search, `/setup` wizard (backend + preferences.md), multi-agent tab view (TabbedContent), `model.reload` IPC ajouté au daemon.
+- **2026-04-02** — Fix GPU Vulkan device selection : avec deux GPUs (iGPU Renoir index 0 + RX 6500 XT NAVI24 index 1), llama-server prenait l'iGPU par défaut (RAM partagée). Ajout de `vulkan_device: int = -1` dans `LocalBackendConfig` (`core/config.py`), injection de `GGML_VULKAN_DEVICE` dans l'env subprocess (`core/runtime/llama_manager.py`), config utilisateur mise à jour avec `vulkan_device: 1`. Résultat : 29/29 couches offloadées sur RX 6500 XT (~1 GB VRAM).
+- **2026-04-02** — Fix download httpx : `hf_hub_download` remplacé par streaming httpx direct pour éviter erreur `bad value(s) in fds_to_keep` (sous-processus git-lfs hérité). Fix progress callback : `call_from_thread` → appel direct car `_download_model_httpx` tourne dans la boucle principale.
+- **2026-04-02** — Fix BINARY_PATTERNS : release b8611 renomme les assets (`ubuntu-vulkan-x64`, `.tar.gz`, `win-cpu-x64`). Extraction étendue aux `.so*`/`.dylib`. `LD_LIBRARY_PATH` injecté automatiquement dans `start_server()` pour résoudre `libmtmd.so.0`.

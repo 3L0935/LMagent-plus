@@ -14,6 +14,7 @@ from core.ipc_protocol import (
     ChatEvent,
     RPCResponse,
     INVALID_REQUEST,
+    INVALID_PARAMS,
     INTERNAL_ERROR,
     parse_message,
     IPCError,
@@ -125,6 +126,38 @@ async def run_daemon(
 
             _archive_session(config, store, agent_name, request.params.message, text_parts)
             await websocket.send(RPCResponse.ok(request.id, {"status": "complete"}).model_dump_json())
+            return
+
+        if method == "model.reload":
+            model_id = data.get("params", {}).get("model_id", "")
+            if not model_id:
+                await websocket.send(
+                    RPCResponse.err(req_id, INVALID_PARAMS, "model_id required").model_dump_json()
+                )
+                return
+            if local_manager is None:
+                await websocket.send(
+                    RPCResponse.err(req_id, INTERNAL_ERROR, "Local backend not enabled").model_dump_json()
+                )
+                return
+            try:
+                from core.runtime.model_manager import get_model_path
+                model_path = get_model_path(model_id)
+                if model_path is None:
+                    await websocket.send(
+                        RPCResponse.err(
+                            req_id, INTERNAL_ERROR, f"Model {model_id!r} not found — download it first"
+                        ).model_dump_json()
+                    )
+                    return
+                await local_manager.ensure_loaded(model_path)
+                await websocket.send(
+                    RPCResponse.ok(req_id, {"status": "loaded", "model": model_id}).model_dump_json()
+                )
+            except Exception as exc:
+                await websocket.send(
+                    RPCResponse.err(req_id, INTERNAL_ERROR, str(exc)).model_dump_json()
+                )
             return
 
         error_resp = RPCResponse.err(id=req_id, code=INVALID_REQUEST, message=f"Unknown method: {method!r}")

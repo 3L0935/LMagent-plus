@@ -25,6 +25,7 @@ class LocalBackendConfig(BaseModel):
     gpu_layers: int = -1
     threads: int = -1
     idle_unload_timeout: int = 0  # seconds before unloading idle model; 0 = never
+    vulkan_device: int = -1  # Vulkan device index (-1 = let llama.cpp choose, 0/1/… = explicit)
 
 
 class AnthropicConfig(BaseModel):

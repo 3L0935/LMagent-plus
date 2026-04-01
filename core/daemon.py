@@ -166,7 +166,7 @@ async def run_daemon(
             await websocket.send(RPCResponse.ok(req_id, {"status": "restarting"}).model_dump_json())
             async def _do_restart() -> None:
                 await asyncio.sleep(0.3)
-                os.execv(sys.executable, sys.argv)
+                os.execv(sys.executable, [sys.executable, "-m", "core"])
             asyncio.create_task(_do_restart())
             return
 

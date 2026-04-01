@@ -49,3 +49,5 @@ cache/
 TODO.md
 CLAUDE.md
 *.lock
+chat
+serve

@@ -176,6 +176,7 @@ class LMAgentTUI(App[None]):
             f"Agent: [green]@{self._persona}[/green]  "
             "Type [bold]/help[/bold] for commands"
         )
+        self.set_interval(5, self._poll_notifications)
 
     # ── Input handling ─────────────────────────────────────────────────────────
 
@@ -270,6 +271,24 @@ class LMAgentTUI(App[None]):
             self._write_system(
                 f"[red]Unknown command:[/red] /{escape(cmd)}  — /help for help"
             )
+
+    # ── Background notification polling ───────────────────────────────────────
+
+    async def _poll_notifications(self) -> None:
+        """Check the daemon for pending system notifications (e.g. idle unload)."""
+        uri = f"ws://127.0.0.1:{self._config.daemon.port}"
+        try:
+            async with websockets.connect(uri, open_timeout=2) as ws:
+                await ws.send(json.dumps({"jsonrpc": "2.0", "method": "poll", "id": "poll"}))
+                raw = await ws.recv()
+                data = json.loads(str(raw))
+                for n in data.get("result", {}).get("notifications", []):
+                    level = n.get("level", "info")
+                    msg = n.get("message", "")
+                    color = "yellow" if level == "warning" else "dim"
+                    self._write_system(f"[{color}]{escape(msg)}[/{color}]")
+        except Exception:
+            pass  # daemon not running or busy — silent
 
     # ── Kill switch ────────────────────────────────────────────────────────────
 
@@ -372,7 +391,17 @@ class LMAgentTUI(App[None]):
                         evt = data["params"]
                         etype = evt.get("type")
 
-                        if etype == "text":
+                        if etype == "status":
+                            msg = evt.get("message", "")
+                            self._write_system(f"[yellow]{escape(msg)}[/yellow]")
+                            self._update_subtitle(msg)
+
+                        elif etype == "model_ready":
+                            msg = evt.get("message", "ready")
+                            self._write_system(f"[green]{escape(msg)}[/green]")
+                            self._update_subtitle("thinking…")
+
+                        elif etype == "text":
                             pending_text.append(evt.get("content", ""))
 
                         elif etype == "tool_call":

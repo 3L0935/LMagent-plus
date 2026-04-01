@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import date
 from typing import TYPE_CHECKING
@@ -21,6 +22,7 @@ from core.ipc_protocol import (
 if TYPE_CHECKING:
     from core.agent import Agent
     from core.memory import PARAStore
+    from core.runtime.llama_manager import LocalBackendManager
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +32,22 @@ async def run_daemon(
     agent: "Agent | None" = None,
     store: "PARAStore | None" = None,
     agent_name: str = "assistant",
+    local_manager: "LocalBackendManager | None" = None,
 ) -> None:
     """Start the WebSocket IPC server and run until cancelled."""
+
+    # Pending system notifications — populated by callbacks (e.g. idle unload)
+    # and drained by the next "poll" request from any CLI client.
+    _notification_queue: list[dict] = []
+
+    def _push_notification(msg: str, level: str = "info") -> None:
+        _notification_queue.append({"message": msg, "level": level})
+
+    # Wire idle-unload callback so the CLI can display it
+    if local_manager is not None:
+        local_manager._on_unload = lambda name: _push_notification(
+            f"{name} unloaded (idle timeout)", level="warning"
+        )
 
     async def _handle_connection(websocket: ServerConnection) -> None:
         client = websocket.remote_address
@@ -49,17 +65,50 @@ async def run_daemon(
 
     async def _dispatch(websocket: ServerConnection, raw: str) -> None:
         try:
-            request = parse_message(raw)
-        except IPCError as exc:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
             error_resp = RPCResponse.err(id="null", code=INVALID_REQUEST, message=str(exc))
             await websocket.send(error_resp.model_dump_json())
             return
 
-        if request.method == "chat":
+        method = data.get("method")
+        req_id = data.get("id", "null")
+
+        if method == "poll":
+            notifications = list(_notification_queue)
+            _notification_queue.clear()
+            await websocket.send(
+                RPCResponse.ok(req_id, {"notifications": notifications}).model_dump_json()
+            )
+            return
+
+        if method == "chat":
+            try:
+                request = parse_message(raw)
+            except IPCError as exc:
+                error_resp = RPCResponse.err(id=req_id, code=INVALID_REQUEST, message=str(exc))
+                await websocket.send(error_resp.model_dump_json())
+                return
+
             if agent is None:
                 err = RPCResponse.err(request.id, INTERNAL_ERROR, "Agent not initialized")
                 await websocket.send(err.model_dump_json())
                 return
+
+            if local_manager is not None and not local_manager.is_loaded:
+                model_name = config.backends.local.default_model or "local model"
+                await websocket.send(
+                    ChatEvent(params={"type": "status", "message": f"Loading {model_name}…"}).model_dump_json()
+                )
+                try:
+                    await local_manager.ensure_loaded_from_config()
+                except Exception as exc:
+                    err = RPCResponse.err(request.id, INTERNAL_ERROR, f"Model load failed: {exc}")
+                    await websocket.send(err.model_dump_json())
+                    return
+                await websocket.send(
+                    ChatEvent(params={"type": "model_ready", "message": f"{model_name} loaded"}).model_dump_json()
+                )
 
             text_parts: list[str] = []
             try:
@@ -76,6 +125,10 @@ async def run_daemon(
 
             _archive_session(config, store, agent_name, request.params.message, text_parts)
             await websocket.send(RPCResponse.ok(request.id, {"status": "complete"}).model_dump_json())
+            return
+
+        error_resp = RPCResponse.err(id=req_id, code=INVALID_REQUEST, message=f"Unknown method: {method!r}")
+        await websocket.send(error_resp.model_dump_json())
 
     port = config.daemon.port
     logger.info("Starting daemon on ws://127.0.0.1:%d", port)

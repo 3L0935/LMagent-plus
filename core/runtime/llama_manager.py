@@ -10,12 +10,15 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import logging
+import os
 import platform
-import socket
+import signal
 import subprocess
+import sys
 import tarfile
 import time
 import zipfile
+from typing import Callable, Optional
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -172,15 +175,21 @@ async def download_llama_server(
     return binary
 
 
-def _wait_for_port(host: str, port: int, timeout: float = 30.0) -> bool:
-    """Poll until the TCP port accepts connections or timeout expires."""
+def _wait_for_health(host: str, port: int, timeout: float = 90.0) -> bool:
+    """Poll llama-server /health until it returns 200 or timeout expires."""
+    import urllib.request
+    import urllib.error
+
+    url = f"http://{host}:{port}/health"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            with socket.create_connection((host, port), timeout=1):
-                return True
-        except OSError:
-            time.sleep(0.5)
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                if resp.status == 200:
+                    return True
+        except Exception:
+            pass
+        time.sleep(1.0)
     return False
 
 
@@ -240,16 +249,17 @@ def start_server(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        start_new_session=True,  # own process group → clean SIGKILL of all children
     )
 
-    if not _wait_for_port("127.0.0.1", port, timeout=startup_timeout):
+    if not _wait_for_health("127.0.0.1", port, timeout=startup_timeout):
         proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
         raise RuntimeError(
-            f"llama-server did not start within {startup_timeout}s on port {port}. "
+            f"llama-server did not become ready within {startup_timeout}s on port {port}. "
             f"Exit code: {proc.returncode}"
         )
 
@@ -257,12 +267,17 @@ def start_server(
 
 
 def stop_server(proc: subprocess.Popen) -> None:
-    """Gracefully stop a running llama-server subprocess."""
+    """Kill the llama-server process group to ensure GPU memory is released."""
     if proc.poll() is not None:
         return  # already stopped
-    proc.terminate()
     try:
+        if sys.platform != "win32":
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        else:
+            proc.kill()
         proc.wait(timeout=10)
+    except (ProcessLookupError, PermissionError):
+        pass  # process already gone
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
@@ -280,11 +295,18 @@ class LocalBackendManager:
     in-progress start to complete before returning.
     """
 
-    def __init__(self, config: "Config") -> None:  # type: ignore[name-defined]
+    def __init__(
+        self,
+        config: "Config",
+        on_unload: Optional[Callable[[str], None]] = None,
+    ) -> None:  # type: ignore[name-defined]
         self._config = config
+        self._on_unload = on_unload  # called with model_name when idle-unload fires
         self._proc: subprocess.Popen | None = None
         self._loaded_model: Path | None = None
         self._lock = asyncio.Lock()
+        self._last_used: float = 0.0
+        self._idle_task: Optional[asyncio.Task] = None
 
     async def ensure_loaded(self, model_path: Path) -> None:
         """
@@ -301,6 +323,7 @@ class LocalBackendManager:
         async with self._lock:
             if self._proc is not None and self._proc.poll() is None:
                 if self._loaded_model == model_path:
+                    self._last_used = time.monotonic()
                     return
                 # Different model — stop current server before restarting.
                 loop = asyncio.get_running_loop()
@@ -308,6 +331,8 @@ class LocalBackendManager:
 
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self._start_sync, model_path)
+            self._last_used = time.monotonic()
+            self._ensure_idle_watcher()
 
     async def ensure_loaded_from_config(self) -> None:
         """
@@ -336,6 +361,7 @@ class LocalBackendManager:
 
     async def unload(self) -> None:
         """Stop llama-server if running. Safe to call when already stopped."""
+        self._cancel_idle_watcher()
         async with self._lock:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self._stop_sync)
@@ -346,6 +372,46 @@ class LocalBackendManager:
         loop has stopped (e.g. at daemon exit).
         """
         self._stop_sync()
+
+    # ------------------------------------------------------------------
+    # Idle unload watcher
+    # ------------------------------------------------------------------
+
+    def _ensure_idle_watcher(self) -> None:
+        """Start the idle watcher task if timeout is configured and not already running."""
+        timeout = self._config.backends.local.idle_unload_timeout
+        if timeout <= 0:
+            return
+        if self._idle_task is not None and not self._idle_task.done():
+            return
+        self._idle_task = asyncio.get_event_loop().create_task(self._idle_watcher(timeout))
+
+    def _cancel_idle_watcher(self) -> None:
+        if self._idle_task is not None and not self._idle_task.done():
+            self._idle_task.cancel()
+        self._idle_task = None
+
+    async def _idle_watcher(self, timeout: int) -> None:
+        log = logging.getLogger(__name__)
+        check_interval = max(10, timeout // 4)
+        try:
+            while True:
+                await asyncio.sleep(check_interval)
+                if not self.is_loaded:
+                    return
+                idle_seconds = time.monotonic() - self._last_used
+                if idle_seconds >= timeout:
+                    model_name = self._loaded_model.name if self._loaded_model else "model"
+                    log.info(
+                        "JIT: model idle for %.0fs (limit %ds) — unloading.",
+                        idle_seconds, timeout,
+                    )
+                    await self.unload()
+                    if self._on_unload:
+                        self._on_unload(model_name)
+                    return
+        except asyncio.CancelledError:
+            pass
 
     @property
     def is_loaded(self) -> bool:

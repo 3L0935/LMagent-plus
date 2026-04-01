@@ -24,6 +24,7 @@ class LocalBackendConfig(BaseModel):
     ctx_size: int = 8192
     gpu_layers: int = -1
     threads: int = -1
+    idle_unload_timeout: int = 0  # seconds before unloading idle model; 0 = never
 
 
 class AnthropicConfig(BaseModel):

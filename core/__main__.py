@@ -76,7 +76,7 @@ def main() -> None:
 
     try:
         asyncio.run(
-            run_daemon(config, agent=agent, store=store, agent_name=DEFAULT_PERSONA)
+            run_daemon(config, agent=agent, store=store, agent_name=DEFAULT_PERSONA, local_manager=local_manager)
         )
     except KeyboardInterrupt:
         logging.getLogger(__name__).info("Daemon stopped.")

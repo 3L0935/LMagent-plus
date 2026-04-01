@@ -74,13 +74,11 @@ def main() -> None:
     config = load_config()
     _setup_logging(config.daemon.log_level)
 
-    local_manager = None
-    if config.routing.default in ("local", "auto"):
-        from core.runtime.llama_manager import LocalBackendManager
-        local_manager = LocalBackendManager(config)
-        logging.getLogger(__name__).info(
-            "JIT local backend enabled — llama-server will start on first request."
-        )
+    from core.runtime.llama_manager import LocalBackendManager
+    local_manager = LocalBackendManager(config)
+    logging.getLogger(__name__).info(
+        "JIT local backend enabled — llama-server will start on first request."
+    )
 
     agent, store = _build_agent(config, local_manager=local_manager)
 

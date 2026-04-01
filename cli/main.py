@@ -504,14 +504,12 @@ class LMAgentTUI(App[None]):
 
     # ── Setup wizard ──────────────────────────────────────────────────────────
     # Steps:
-    #   0  routing   (local / cloud / auto)
-    #   1  anthropic key  (Enter = blank)
-    #   2  openai key     (Enter = blank)
-    #   3  backend        (vulkan / cuda / …)
-    #   4  language
-    #   5  interests
-    #   6  models         (skipped when routing=cloud)
-    #   7  confirm
+    #   0  routing   (local / cloud / auto)  — warns about shell env for API keys
+    #   1  backend   (vulkan / cuda / …)
+    #   2  language
+    #   3  interests
+    #   4  models    (skipped when routing=cloud)
+    #   5  confirm
 
     async def _start_setup_wizard(self) -> None:
         if self._streaming:
@@ -560,7 +558,7 @@ class LMAgentTUI(App[None]):
         self._wizard_active        = True
 
         self._write_system(
-            "\n[bold]Step 1/7 — Routing[/bold]\n"
+            "\n[bold]Step 1/5 — Routing[/bold]\n"
             "  How should the daemon route requests by default?\n"
             "  [dim]local[/dim] = local model only   "
             "[dim]cloud[/dim] = API (Anthropic/OpenAI)   "
@@ -582,40 +580,21 @@ class LMAgentTUI(App[None]):
                 return
             self._wizard_data["routing"] = choice
             self._wizard_step = 1
-            self._write_system(
-                f"  [dim]Routing →[/dim] [cyan]{choice}[/cyan]\n\n"
-                "[bold]Step 2/7 — Anthropic API key[/bold]\n"
-                "  Used for cloud routing (claude-* models)\n"
-                "  [yellow]>[/yellow]  [dim]Enter = skip[/dim]"
+            cloud_note = (
+                "\n  [dim]For cloud routing, set [bold]ANTHROPIC_API_KEY[/bold] or "
+                "[bold]OPENAI_API_KEY[/bold] in your shell environment.[/dim]"
+                if choice in ("cloud", "auto") else ""
             )
-
-        elif step == 1:  # anthropic key
-            self._wizard_data["anthropic_key"] = text.strip()
-            self._wizard_step = 2
+            best  = self._wizard_data.get("_best", "cpu")
+            avail = self._wizard_backends
             self._write_system(
-                "  [dim]Anthropic key →[/dim] "
-                + ("[green]set[/green]" if text.strip() else "[dim]blank[/dim]")
-                + "\n\n"
-                "[bold]Step 3/7 — OpenAI API key[/bold]\n"
-                "  Used for cloud routing (gpt-* models)\n"
-                "  [yellow]>[/yellow]  [dim]Enter = skip[/dim]"
-            )
-
-        elif step == 2:  # openai key
-            self._wizard_data["openai_key"] = text.strip()
-            best   = self._wizard_data.get("_best", "cpu")
-            avail  = self._wizard_backends
-            self._wizard_step = 3
-            self._write_system(
-                "  [dim]OpenAI key →[/dim] "
-                + ("[green]set[/green]" if text.strip() else "[dim]blank[/dim]")
-                + "\n\n"
-                "[bold]Step 4/7 — Local backend[/bold]\n"
+                f"  [dim]Routing →[/dim] [cyan]{choice}[/cyan]{cloud_note}\n\n"
+                "[bold]Step 2/5 — Local backend[/bold]\n"
                 f"  Available: {', '.join(avail) if avail else '[dim]none detected[/dim]'}\n"
                 f"  [yellow]>[/yellow]  [dim]Enter = {best}[/dim]"
             )
 
-        elif step == 3:  # backend
+        elif step == 1:  # backend
             best   = self._wizard_data.get("_best", "cpu")
             avail  = self._wizard_backends or [best]
             choice = text.strip().lower() or best
@@ -626,36 +605,36 @@ class LMAgentTUI(App[None]):
                 )
                 return
             self._wizard_data["backend"] = choice
-            self._wizard_step = 4
+            self._wizard_step = 2
             self._write_system(
                 f"  [dim]Backend →[/dim] [cyan]{choice}[/cyan]\n\n"
-                "[bold]Step 5/7 — Language[/bold]\n"
+                "[bold]Step 3/5 — Language[/bold]\n"
                 "  Preferred language for agent responses\n"
                 "  [yellow]>[/yellow]  [dim]Enter = English[/dim]"
             )
 
-        elif step == 4:  # language
+        elif step == 2:  # language
             self._wizard_data["language"] = text.strip() or "English"
-            self._wizard_step = 5
+            self._wizard_step = 3
             self._write_system(
                 f"  [dim]Language →[/dim] [cyan]{escape(self._wizard_data['language'])}[/cyan]\n\n"
-                "[bold]Step 6/7 — Interests[/bold]\n"
+                "[bold]Step 4/5 — Interests[/bold]\n"
                 "  Comma-separated topics  (e.g. coding, writing, science)\n"
                 "  [yellow]>[/yellow]  [dim]Enter = general[/dim]"
             )
 
-        elif step == 5:  # interests
+        elif step == 3:  # interests
             self._wizard_data["interests"] = text.strip() or "general"
-            self._wizard_step = 6
+            self._wizard_step = 4
             if self._wizard_data.get("routing") == "cloud":
                 # Skip model step for cloud-only users
                 self._wizard_data.setdefault("models_to_download", [])
-                self._wizard_step = 7
+                self._wizard_step = 5
                 await self._wizard_show_confirm()
             else:
                 await self._wizard_show_model_step()
 
-        elif step == 6:  # model selection
+        elif step == 4:  # model selection
             raw = text.strip().lower()
             if raw in ("", "skip", "s"):
                 self._wizard_data.setdefault("models_to_download", [])
@@ -682,10 +661,10 @@ class LMAgentTUI(App[None]):
             self._wizard_data["models_to_download"] = selected
             if not self._wizard_data.get("default_model") and selected:
                 self._wizard_data["default_model"] = selected[0]
-            self._wizard_step = 7
+            self._wizard_step = 5
             await self._wizard_show_confirm()
 
-        elif step == 7:  # confirm
+        elif step == 5:  # confirm
             if text.strip().lower() in ("y", "yes"):
                 await self._apply_wizard()
             else:
@@ -694,21 +673,21 @@ class LMAgentTUI(App[None]):
             self._wizard_step   = 0
 
     async def _wizard_show_model_step(self) -> None:
-        """Step 7/7 — show downloaded models or suggest catalog picks."""
+        """Step 5/5 — show downloaded models or suggest catalog picks."""
         try:
             from core.runtime.model_manager import _load_catalog, list_downloaded_models
             downloaded = list_downloaded_models()
             catalog    = _load_catalog()
         except Exception as exc:
             self._write_error(f"Could not read model catalog: {escape(str(exc))}")
-            self._wizard_step = 7
+            self._wizard_step = 5
             await self._wizard_show_confirm()
             return
 
         downloaded_ids = {m["id"] for m in downloaded}
         self._wizard_catalog_picks = self._pick_catalog_models(catalog, downloaded_ids)
 
-        lines = ["\n[bold]Step 7/7 — Models[/bold]"]
+        lines = ["\n[bold]Step 5/5 — Models[/bold]"]
 
         if downloaded:
             names   = "  ".join(f"[cyan]{m['id']}[/cyan]" for m in downloaded)
@@ -768,15 +747,11 @@ class LMAgentTUI(App[None]):
         backend   = self._wizard_data.get("backend", "cpu")
         language  = self._wizard_data.get("language", "English")
         interests = self._wizard_data.get("interests", "general")
-        anth_key  = self._wizard_data.get("anthropic_key", "")
-        oai_key   = self._wizard_data.get("openai_key", "")
         to_dl     = self._wizard_data.get("models_to_download", [])
         default   = self._wizard_data.get("default_model", "")
 
         lines = ["\n[bold]Confirm setup:[/bold]"]
         lines.append(f"  Routing:   [cyan]{routing}[/cyan]")
-        lines.append(f"  Anthropic: {'[green]key set[/green]' if anth_key else '[dim]blank[/dim]'}")
-        lines.append(f"  OpenAI:    {'[green]key set[/green]' if oai_key else '[dim]blank[/dim]'}")
         lines.append(f"  Backend:   [cyan]{backend}[/cyan]")
         lines.append(f"  Language:  [cyan]{escape(language)}[/cyan]")
         lines.append(f"  Interests: [cyan]{escape(interests)}[/cyan]")
@@ -798,8 +773,6 @@ class LMAgentTUI(App[None]):
         backend       = self._wizard_data.get("backend", "cpu")
         language      = self._wizard_data.get("language", "English")
         interests     = self._wizard_data.get("interests", "general")
-        anth_key      = self._wizard_data.get("anthropic_key", "")
-        oai_key       = self._wizard_data.get("openai_key", "")
         to_dl         = self._wizard_data.get("models_to_download", [])
         default_model = self._wizard_data.get("default_model", "")
 
@@ -819,28 +792,6 @@ class LMAgentTUI(App[None]):
             self._write_error(f"Failed to update config.yaml: {escape(str(exc))}")
             return
 
-        # Write API keys to ~/.lmagent-plus/.env (setdefault — don't override shell env)
-        env_path = _USER_DIR / ".env"
-        env_lines: list[str] = []
-        if env_path.exists():
-            env_lines = env_path.read_text().splitlines()
-        def _set_env_line(lines: list[str], key: str, value: str) -> list[str]:
-            lines = [l for l in lines if not l.startswith(f"{key}=")]
-            if value:
-                lines.append(f'{key}="{value}"')
-            return lines
-        if anth_key:
-            env_lines = _set_env_line(env_lines, "ANTHROPIC_API_KEY", anth_key)
-        if oai_key:
-            env_lines = _set_env_line(env_lines, "OPENAI_API_KEY", oai_key)
-        if anth_key or oai_key:
-            env_path.write_text("\n".join(env_lines) + "\n")
-            import os as _os
-            if anth_key:
-                _os.environ["ANTHROPIC_API_KEY"] = anth_key
-            if oai_key:
-                _os.environ["OPENAI_API_KEY"] = oai_key
-
         # Write global/preferences.md
         prefs_path = _USER_DIR / "memory" / "global" / "preferences.md"
         prefs_path.parent.mkdir(parents=True, exist_ok=True)
@@ -857,8 +808,6 @@ class LMAgentTUI(App[None]):
             "[green]Config written.[/green]",
             f"  routing=[cyan]{routing}[/cyan]  backend=[cyan]{backend}[/cyan]",
         ]
-        if anth_key or oai_key:
-            status_lines.append(f"  .env — API keys saved to {escape(str(env_path))}")
         if default_model:
             status_lines.append(f"  default model → [cyan]{default_model}[/cyan]")
         status_lines.append(

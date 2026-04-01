@@ -6,12 +6,15 @@ import sys
 
 from core.config import load_config
 from core.memory import PARAStore
+from core.memory.para_store import MEMORY_DIR
 from core.persona_loader import load_persona, make_system_prompt_hook
 from core.tool_registry import ToolRegistry
 from core.tools.bash import BASH_TOOL
 from core.tools.file_ops import READ_FILE_TOOL, WRITE_FILE_TOOL, LIST_DIRECTORY_TOOL
 from core.tools.git import GIT_CLONE_TOOL, GIT_STATUS_TOOL, GIT_LOG_TOOL
 from core.tools.call_agent import make_call_agent_tool
+from core.tools.memory_ops import make_update_memory_tool
+from core.app_prompt import make_app_system_hook
 from core.router import AgentRouter, Router
 from core.agent import Agent
 from core.daemon import run_daemon
@@ -36,6 +39,9 @@ def _build_agent(config, local_manager=None) -> tuple[Agent, PARAStore]:
     # call_agent — Phase 2.5 multi-agent delegation
     registry.register(make_call_agent_tool(AgentRouter(), registry))
 
+    # update_memory — persist preferences and learned patterns across sessions
+    registry.register(make_update_memory_tool(DEFAULT_PERSONA, MEMORY_DIR))
+
     # Memory hooks
     global_hook = store.make_global_memory_hook()
     agent_hook = store.make_agent_memory_hook(DEFAULT_PERSONA)
@@ -44,10 +50,13 @@ def _build_agent(config, local_manager=None) -> tuple[Agent, PARAStore]:
     persona = load_persona(DEFAULT_PERSONA)
     persona_hook = make_system_prompt_hook(persona, registry, memory_fn=agent_hook)
 
+    # App-level system prompt — injected first, before persona and memory
+    app_hook = make_app_system_hook()
+
     agent = Agent(
         router=Router(config, local_manager=local_manager),
         tool_registry=registry,
-        system_prompt_hooks=[global_hook, persona_hook],
+        system_prompt_hooks=[app_hook, global_hook, persona_hook],
     )
     return agent, store
 

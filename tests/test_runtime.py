@@ -6,8 +6,10 @@ All subprocess and HTTP calls are mocked — no real network access or binaries 
 
 from __future__ import annotations
 
+import asyncio
 import socket
 import subprocess
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch, mock_open
 
@@ -150,7 +152,7 @@ class TestStartServer:
 
         with (
             patch("core.runtime.llama_manager.SERVER_BINARY", fake_binary),
-            patch("core.runtime.llama_manager._wait_for_port", return_value=False),
+            patch("core.runtime.llama_manager._wait_for_health", return_value=False),
             patch("subprocess.Popen") as mock_popen,
         ):
             mock_proc = MagicMock()
@@ -158,7 +160,7 @@ class TestStartServer:
             mock_proc.returncode = 1
             mock_popen.return_value = mock_proc
 
-            with pytest.raises(RuntimeError, match="did not start within"):
+            with pytest.raises(RuntimeError, match="did not become ready within"):
                 start_server(
                     model_path=tmp_path / "model.gguf",
                     backend="cpu",
@@ -174,7 +176,7 @@ class TestStartServer:
 
         with (
             patch("core.runtime.llama_manager.SERVER_BINARY", fake_binary),
-            patch("core.runtime.llama_manager._wait_for_port", return_value=True),
+            patch("core.runtime.llama_manager._wait_for_health", return_value=True),
             patch("subprocess.Popen") as mock_popen,
         ):
             mock_proc = MagicMock()
@@ -301,11 +303,19 @@ class TestStopServer:
 
     def test_stop_running_process(self):
         from core.runtime.llama_manager import stop_server
+        import os, signal, sys
 
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None  # running
-        stop_server(mock_proc)
-        mock_proc.terminate.assert_called_once()
+        mock_proc.pid = 12345
+
+        if sys.platform != "win32":
+            with patch("os.killpg") as mock_killpg, patch("os.getpgid", return_value=12345):
+                stop_server(mock_proc)
+            mock_killpg.assert_called_once_with(12345, signal.SIGKILL)
+        else:
+            stop_server(mock_proc)
+            mock_proc.kill.assert_called_once()
 
 
 # ── model_manager ─────────────────────────────────────────────────────────────
@@ -422,3 +432,153 @@ class TestDownloadModel:
                     filename="model.gguf",
                     dest=Path("fail-model"),
                 )
+
+
+# ── LocalBackendManager idle unload ──────────────────────────────────────────
+
+def _make_manager(timeout: int = 15):
+    from core.runtime.llama_manager import LocalBackendManager
+
+    config = MagicMock()
+    config.backends.local.idle_unload_timeout = timeout
+    config.backends.local.backend = "cpu"
+    config.backends.local.port = 18080
+    config.backends.local.ctx_size = 2048
+    config.backends.local.gpu_layers = 0
+    config.backends.local.threads = 4
+    return LocalBackendManager(config)
+
+
+class TestLocalBackendManagerIdleUnload:
+    """
+    Regression tests for the idle-unload self-cancellation bug.
+
+    Bug: _idle_watcher called unload() → unload() called _cancel_idle_watcher()
+    → _cancel_idle_watcher() called self._idle_task.cancel() on the running task
+    → CancelledError raised at the next await in unload() (the lock acquire)
+    → _stop_sync never ran → llama-server stayed alive.
+
+    Fix: _cancel_idle_watcher skips cancel() if the caller IS the idle task.
+    """
+
+    @pytest.mark.asyncio
+    async def test_idle_watcher_calls_stop_sync_when_idle(self):
+        """Core regression: _stop_sync must be called when idle timeout is exceeded."""
+        mgr = _make_manager(timeout=15)
+        mgr._proc = MagicMock()
+        mgr._proc.poll.return_value = None
+        mgr._loaded_model = Path("/fake/model.gguf")
+        mgr._last_used = time.monotonic() - 20  # idle 20s > 15s limit
+
+        stop_called = []
+
+        def fake_stop():
+            stop_called.append(True)
+            mgr._proc = None
+            mgr._loaded_model = None
+
+        mgr._stop_sync = fake_stop
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await mgr._idle_watcher(15)
+
+        assert stop_called, "_stop_sync was never called — idle unload did not fire"
+        assert mgr._proc is None
+
+    @pytest.mark.asyncio
+    async def test_idle_watcher_fires_on_unload_callback(self):
+        """on_unload callback must be invoked with the model name after unloading."""
+        unloaded = []
+        mgr = _make_manager(timeout=15)
+        mgr._on_unload = unloaded.append
+        mgr._proc = MagicMock()
+        mgr._proc.poll.return_value = None
+        mgr._loaded_model = Path("/fake/my-model.gguf")
+        mgr._last_used = time.monotonic() - 20
+
+        def fake_stop():
+            mgr._proc = None
+            mgr._loaded_model = None
+
+        mgr._stop_sync = fake_stop
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await mgr._idle_watcher(15)
+
+        assert unloaded == ["my-model.gguf"]
+
+    @pytest.mark.asyncio
+    async def test_idle_watcher_skips_unload_when_recently_used(self):
+        """If the model was used recently, the watcher must not unload on first check."""
+        mgr = _make_manager(timeout=15)
+        mgr._proc = MagicMock()
+        mgr._proc.poll.return_value = None
+        mgr._loaded_model = Path("/fake/model.gguf")
+        mgr._last_used = time.monotonic()  # just used
+
+        stop_called = []
+
+        def fake_stop():
+            stop_called.append(True)
+            mgr._proc = None
+            mgr._loaded_model = None
+
+        mgr._stop_sync = fake_stop
+
+        sleep_count = 0
+
+        async def fake_sleep(_):
+            nonlocal sleep_count
+            sleep_count += 1
+            if sleep_count >= 2:
+                # Simulate server stopped externally to exit the loop
+                mgr._proc = None
+
+        with patch("asyncio.sleep", side_effect=fake_sleep):
+            await mgr._idle_watcher(15)
+
+        assert not stop_called, "_stop_sync should not be called for a recently used model"
+
+    @pytest.mark.asyncio
+    async def test_external_cancel_does_not_call_stop_sync(self):
+        """Cancelling the watcher from outside must not trigger _stop_sync."""
+        mgr = _make_manager(timeout=15)
+        mgr._proc = MagicMock()
+        mgr._proc.poll.return_value = None
+        mgr._loaded_model = Path("/fake/model.gguf")
+        mgr._last_used = time.monotonic()
+
+        stop_called = []
+        mgr._stop_sync = lambda: stop_called.append(True)
+
+        async def run():
+            task = asyncio.get_event_loop().create_task(mgr._idle_watcher(15))
+            await asyncio.sleep(0)  # let watcher start
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await run()
+
+        assert not stop_called
+
+    @pytest.mark.asyncio
+    async def test_cancel_idle_watcher_does_not_cancel_self(self):
+        """
+        _cancel_idle_watcher must not cancel the task that calls it
+        (i.e. when called from within the idle watcher itself via unload()).
+        """
+        mgr = _make_manager(timeout=15)
+
+        # Simulate the scenario: we are inside the idle task calling _cancel_idle_watcher
+        async def simulate_watcher_calling_cancel():
+            task = asyncio.current_task()
+            mgr._idle_task = task  # pretend this task is the idle watcher
+            mgr._cancel_idle_watcher()  # must NOT cancel us
+            return "survived"
+
+        result = await simulate_watcher_calling_cancel()
+        assert result == "survived"

@@ -388,7 +388,16 @@ class LocalBackendManager:
 
     def _cancel_idle_watcher(self) -> None:
         if self._idle_task is not None and not self._idle_task.done():
-            self._idle_task.cancel()
+            # Don't cancel the task if it's the one currently calling us
+            # (e.g. _idle_watcher → unload → _cancel_idle_watcher).
+            # Cancelling from within would raise CancelledError at the next
+            # await in unload(), preventing _stop_sync from ever running.
+            try:
+                current = asyncio.current_task()
+            except RuntimeError:
+                current = None
+            if self._idle_task is not current:
+                self._idle_task.cancel()
         self._idle_task = None
 
     async def _idle_watcher(self, timeout: int) -> None:

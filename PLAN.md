@@ -146,6 +146,23 @@ After Phase 2 merges.
 
 ---
 
+### Phase 5.1 — CLI polish + UX fixes `[x]`
+
+**Goal:** Bug fixes and UX improvements identified during first real use of Phase 5.
+After Phase 5 ships.
+
+- [x] Fix `@assistant` persona: `call_agent` hint ambiguity caused file writes to delegate to `writer` — clarified hint, made `file_ops` (read/write/create) explicit
+- [x] Fix: theme persistence — `watch_theme` reactive saves any theme (tokyo-night, atom-one-dark…) to `~/.lmagent-plus/cli_state.json`; restored on mount. Use `ctrl+p` (Textual native palette) to change theme.
+- [x] UX: slash command autocomplete — `Static#completions` above the input, filtered in real-time on `/`; hides on submit
+- [x] UX: `/models` command — lists cloud models + local catalog with download status (`✓`/`·`) and tags
+- [x] UX: active model shown in subtitle (`@persona | model | status`)
+- [x] UX: `/model` prompts y/n reload; `/reload` command; `model_id` propagated per-request through IPC → daemon → agent → router (no daemon restart needed)
+- [x] Fix: `recent_tasks.md` grows unboundedly — capped at 50 entries (oldest trimmed)
+
+**Exit criterion:** Theme persists across restarts, model visible, file writes work from `@assistant`, model override takes effect immediately.
+
+---
+
 ## v0.2 Phases (deferred)
 
 ### Phase 6 — Desktop GUI `[ ]`
@@ -165,10 +182,25 @@ Blocked until Phase 5 ships. Requires Rust + Node toolchains.
 
 ---
 
+### Phase 5.2 — CLI model management + JIT `[ ]`
+
+**Goal:** Full model lifecycle from the CLI — discover, download, switch, no daemon restart.
+Blocked until Phase 5.1 ships.
+
+- `[ ]` JIT model load/unload — daemon starts without loading a model; loads on first request, unloads on switch
+- `[ ]` `/model <id>` on a non-downloaded catalog model → prompt to download, then hot-reload llama-server
+- `[ ]` `/hf [query]` — HuggingFace model search with download; recommended catalog models shown first (tags, VRAM/RAM requirements)
+- `[ ]` `/setup` wizard — guided backend switch (rocm, vulkan, cpu…), user profile questions (language, interests → injected into system prompt as `global/preferences.md`)
+- `[ ]` Multi-agent tab view — switch between active agents in the TUI when an agent delegates
+
+**Exit criterion:** User can discover, download and use a new local model entirely from the TUI without touching config files.
+
+---
+
 ### Phase 7 — Installer `[ ]`
 
 **Goal:** One-command install, from zero to a running model.
-Blocked until Phases 1–5 ship.
+Blocked until Phases 1–5.2 ship.
 **Important:** The installer is orchestration glue, not logic. It bootstraps Python and calls
 `core.runtime.backend_detector` and `core.runtime.model_manager` — it does not reimplement
 hardware detection in shell.

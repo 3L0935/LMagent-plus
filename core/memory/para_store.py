@@ -101,9 +101,9 @@ class PARAStore:
         return path
 
     def append_recent_task(
-        self, agent_name: str, task_date: str, tasks: list[str]
+        self, agent_name: str, task_date: str, tasks: list[str], max_entries: int = 50
     ) -> None:
-        """Append a dated entry to agents/<name>/recent_tasks.md."""
+        """Append a dated entry to agents/<name>/recent_tasks.md (capped at max_entries)."""
         agent_dir = self._base / "agents" / agent_name
         agent_dir.mkdir(parents=True, exist_ok=True)
         path = agent_dir / "recent_tasks.md"
@@ -112,6 +112,19 @@ class PARAStore:
             lines.append(f"- {task}")
         with path.open("a", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
+        self._trim_recent_tasks(path, max_entries)
+
+    @staticmethod
+    def _trim_recent_tasks(path: Path, max_entries: int) -> None:
+        """Keep only the last max_entries dated sections in a recent_tasks.md file."""
+        text = path.read_text(encoding="utf-8")
+        parts = text.split("\n## ")
+        # parts[0] = file header, parts[1:] = dated entries (without leading "\n## ")
+        if len(parts) - 1 <= max_entries:
+            return
+        header = parts[0]
+        kept = parts[-(max_entries):]
+        path.write_text(header + "".join(f"\n## {e}" for e in kept), encoding="utf-8")
 
     # ------------------------------------------------------------------
     # Plugin pipeline hooks (for core/agent.py)

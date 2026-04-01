@@ -20,6 +20,7 @@ from core.errors import IPCError
 class ChatParams(BaseModel):
     message: str
     agent_id: str | None = None
+    model_id: str | None = None
 
 
 class ChatRequest(BaseModel):

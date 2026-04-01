@@ -63,7 +63,7 @@ async def run_daemon(
 
             text_parts: list[str] = []
             try:
-                async for event in agent.run(request.params.message):
+                async for event in agent.run(request.params.message, model=request.params.model_id):
                     chat_event = ChatEvent(params=event)
                     await websocket.send(chat_event.model_dump_json())
                     if event.get("type") == "text":

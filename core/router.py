@@ -28,6 +28,7 @@ class Router:
         messages: list[dict],
         tools: list[dict] | None = None,
         stream: bool = False,
+        model: str | None = None,
     ) -> dict:
         """
         Route a chat completion request to the configured backend.
@@ -52,14 +53,14 @@ class Router:
         if backend == "local":
             return await self._local_completion(messages, tools)
         if backend == "cloud":
-            return await self._cloud_completion(messages, tools)
+            return await self._cloud_completion(messages, tools, model_override=model)
         if backend == "auto":
             try:
                 return await self._local_completion(messages, tools)
             except (BackendError, OSError):
                 if not self._config.routing.auto_fallback:
                     raise
-                return await self._cloud_completion(messages, tools)
+                return await self._cloud_completion(messages, tools, model_override=model)
 
         raise BackendError(f"Unknown backend: {backend!r}")
 
@@ -95,6 +96,7 @@ class Router:
         self,
         messages: list[dict],
         tools: list[dict] | None,
+        model_override: str | None = None,
     ) -> dict:
         """Route to the configured cloud provider."""
         cloud_cfg = self._config.backends.cloud
@@ -104,9 +106,11 @@ class Router:
         openai_key = os.environ.get("OPENAI_API_KEY")
 
         if anthropic_key:
-            return await self._anthropic_completion(messages, tools, cloud_cfg.anthropic.default_model, anthropic_key)
+            model = model_override or cloud_cfg.anthropic.default_model
+            return await self._anthropic_completion(messages, tools, model, anthropic_key)
         if openai_key:
-            return await self._openai_completion(messages, tools, cloud_cfg.openai.default_model, openai_key)
+            model = model_override or cloud_cfg.openai.default_model
+            return await self._openai_completion(messages, tools, model, openai_key)
 
         raise BackendError(
             "No cloud API key found. Set ANTHROPIC_API_KEY or OPENAI_API_KEY."

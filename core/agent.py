@@ -58,7 +58,7 @@ class Agent:
             fragments.append(f"You have access to the following tools:\n{tool_lines}")
         return "\n\n".join(f for f in fragments if f)
 
-    async def run(self, user_message: str) -> AsyncGenerator[dict, None]:
+    async def run(self, user_message: str, model: str | None = None) -> AsyncGenerator[dict, None]:
         """
         Execute the agent loop for a single user message.
 
@@ -82,6 +82,7 @@ class Agent:
                 response = await self._router.chat_completion(
                     messages=messages,
                     tools=tools_api or None,
+                    model=model,
                 )
             except Exception as exc:
                 yield {"type": "error", "message": f"LLM call failed: {exc}"}

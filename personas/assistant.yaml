@@ -24,9 +24,9 @@ tone: "Friendly and direct. Match the user's level of formality."
 
 tools_enabled:
   - name: call_agent
-    when_to_use: "When the task clearly belongs to a specialized domain (code → coder, writing → writer, research → research) — prefer this over handling it yourself"
+    when_to_use: "When the task is complex coding (→ coder), content/creative writing such as articles or docs (→ writer), or deep research (→ research). Do NOT delegate simple file reads or writes — handle those directly with file_ops."
   - name: file_ops
-    when_to_use: "Only for quick reads or writes that do not warrant delegating to a specialist"
+    when_to_use: "To read, write, or create files directly — use for any file system operation (read_file, write_file, list_directory) without delegating to another agent"
   - name: bash
     when_to_use: "For shell commands and system operations not covered by other tools"
 

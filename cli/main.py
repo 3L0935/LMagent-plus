@@ -10,7 +10,9 @@ Slash commands
 /agent [name]      Switch active agent
 /persona           Show active persona info
 /tools             List enabled tools for the active agent
-/model [name]      Override cloud model (requires daemon restart to take effect)
+/model [name]      Override model — prompts for immediate reload or use /reload later
+/models            List available models (cloud + local catalog)
+/reload            Apply current model override to next message
 /clear             Clear chat history
 /stop              Cancel the current response  (same as ESC)
 /status            Daemon connection info
@@ -19,6 +21,7 @@ Keyboard
 --------
 ESC        Cancel current response
 Ctrl+C     Quit
+p          Toggle dark/light theme
 """
 
 from __future__ import annotations
@@ -26,15 +29,30 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from pathlib import Path
 from typing import Any
 
 import websockets
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Footer, Header, Input, RichLog
+from textual.widgets import Footer, Header, Input, RichLog, Static
 
 from core.config import Config
+
+_CLI_STATE = Path.home() / ".lmagent-plus" / "cli_state.json"
+
+SLASH_COMMANDS = [
+    "/help", "/agent", "/persona", "/tools", "/model", "/models",
+    "/reload", "/clear", "/stop", "/status",
+]
+
+
+def _active_model(config: Config) -> str:
+    if config.routing.default == "local":
+        return config.backends.local.default_model or "local"
+    return config.backends.cloud.anthropic.default_model
+
 
 VALID_AGENTS = {"assistant", "coder", "writer", "research"}
 
@@ -45,12 +63,14 @@ HELP_TEXT = """\
   [bold]/agent[/bold] \\[name]     Switch active agent (assistant | coder | writer | research)
   [bold]/persona[/bold]           Show active persona info
   [bold]/tools[/bold]             List enabled tools for the active agent
-  [bold]/model[/bold] \\[name]     Override cloud model (requires daemon restart)
+  [bold]/model[/bold] \\[name]     Override model — prompts to reload now or use /reload later
+  [bold]/models[/bold]           List available models (cloud + local catalog)
+  [bold]/reload[/bold]            Apply current model override to next message
   [bold]/clear[/bold]             Clear chat history
   [bold]/stop[/bold]              Cancel current response  (same as [bold]ESC[/bold])
   [bold]/status[/bold]            Daemon connection info
 
-[dim]Keyboard:[/dim]  ESC = cancel   Ctrl+C = quit\
+[dim]Keyboard:[/dim]  ESC = cancel   Ctrl+C = quit   p = theme\
 """
 
 CSS = """
@@ -60,6 +80,16 @@ RichLog {
     margin: 0 1;
     padding: 0 1;
     scrollbar-gutter: stable;
+}
+
+#completions {
+    height: auto;
+    max-height: 6;
+    margin: 0 1;
+    padding: 0 1;
+    display: none;
+    background: $surface-darken-1;
+    color: $text-muted;
 }
 
 Input {
@@ -122,6 +152,7 @@ class LMAgentTUI(App[None]):
         self._model_override: str | None = None
         self._ws_task: asyncio.Task[None] | None = None
         self._streaming = False
+        self._reload_confirm_pending = False
         super().__init__()
 
     # ── Composition ────────────────────────────────────────────────────────────
@@ -129,10 +160,16 @@ class LMAgentTUI(App[None]):
     def compose(self) -> ComposeResult:
         yield Header()
         yield RichLog(markup=True, highlight=False, wrap=True, id="chat")
+        yield Static("", id="completions", markup=True)
         yield Input(placeholder="Type a message or /help…", id="input")
         yield Footer()
 
     def on_mount(self) -> None:
+        state = self._load_ui_state()
+        if "theme" in state:
+            self.theme = state["theme"]
+        elif "dark" in state:  # backwards compat with old cli_state.json
+            self.theme = "textual-dark" if state["dark"] else "textual-light"
         self._update_subtitle()
         self._write_system(
             f"Daemon: [cyan]ws://127.0.0.1:{self._config.daemon.port}[/cyan]  "
@@ -143,10 +180,24 @@ class LMAgentTUI(App[None]):
     # ── Input handling ─────────────────────────────────────────────────────────
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.query_one("#completions", Static).display = False
         text = event.value.strip()
         event.input.clear()
         if not text:
             return
+
+        # y/n intercept for model reload confirmation
+        if self._reload_confirm_pending:
+            self._reload_confirm_pending = False
+            if text.lower() in ("y", "yes"):
+                self._do_reload()
+            else:
+                self._write_system(
+                    "[dim]Reload cancelled — model change applies on next message. "
+                    "Use [bold]/reload[/bold] anytime.[/dim]"
+                )
+            return
+
         if text.startswith("/"):
             await self._handle_slash(text)
         elif self._streaming:
@@ -190,16 +241,27 @@ class LMAgentTUI(App[None]):
         elif cmd == "tools":
             self._show_tools()
 
+        elif cmd == "models":
+            self._show_models()
+
         elif cmd == "model":
             if not args:
                 current = self._model_override or "(default from config)"
                 self._write_system(f"Current model override: [cyan]{current}[/cyan]")
             else:
                 self._model_override = args[0]
+                self._update_subtitle()
+                self._reload_confirm_pending = True
                 self._write_system(
                     f"Model override set: [cyan]{escape(self._model_override)}[/cyan]\n"
-                    "[dim]Restart the daemon for this to take effect.[/dim]"
+                    "[yellow]Reload now? [y/n][/yellow]  (or use [bold]/reload[/bold] later)"
                 )
+
+        elif cmd == "reload":
+            if self._model_override:
+                self._do_reload()
+            else:
+                self._write_system("[dim]No model override set — nothing to reload.[/dim]")
 
         elif cmd == "status":
             self._show_connection_status()
@@ -208,6 +270,54 @@ class LMAgentTUI(App[None]):
             self._write_system(
                 f"[red]Unknown command:[/red] /{escape(cmd)}  — /help for help"
             )
+
+    # ── Kill switch ────────────────────────────────────────────────────────────
+
+    # ── Theme persistence ──────────────────────────────────────────────────────
+
+    def _load_ui_state(self) -> dict:
+        try:
+            if _CLI_STATE.exists():
+                return json.loads(_CLI_STATE.read_text())
+        except Exception:
+            pass
+        return {}
+
+    def _save_ui_state(self, state: dict) -> None:
+        try:
+            _CLI_STATE.parent.mkdir(parents=True, exist_ok=True)
+            _CLI_STATE.write_text(json.dumps(state))
+        except Exception:
+            pass
+
+    def watch_theme(self, theme: str) -> None:
+        """Persist any theme change (command palette, API…) to cli_state.json."""
+        state = self._load_ui_state()
+        state["theme"] = theme
+        self._save_ui_state(state)
+
+    # ── Slash command autocomplete ─────────────────────────────────────────────
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        completions = self.query_one("#completions", Static)
+        text = event.value
+        if text.startswith("/"):
+            matches = [c for c in SLASH_COMMANDS if c.startswith(text.lower())]
+            if matches:
+                parts = "  ".join(f"[bold cyan]{m}[/bold cyan]" for m in matches)
+                completions.update(parts)
+                completions.display = True
+                return
+        completions.display = False
+
+    def _do_reload(self) -> None:
+        """Confirm model override is active — takes effect on the next message."""
+        self._reload_confirm_pending = False
+        self._update_subtitle()
+        self._write_system(
+            f"[green]Model reloaded:[/green] [cyan]{escape(self._model_override or '')}[/cyan]"
+            " — active on next message."
+        )
 
     # ── Kill switch ────────────────────────────────────────────────────────────
 
@@ -242,13 +352,13 @@ class LMAgentTUI(App[None]):
         uri = f"ws://127.0.0.1:{self._config.daemon.port}"
         try:
             async with websockets.connect(uri, open_timeout=5) as ws:
+                params: dict = {"message": message, "agent_id": self._persona}
+                if self._model_override:
+                    params["model_id"] = self._model_override
                 payload = json.dumps({
                     "jsonrpc": "2.0",
                     "method": "chat",
-                    "params": {
-                        "message": message,
-                        "agent_id": self._persona,
-                    },
+                    "params": params,
                     "id": str(uuid.uuid4()),
                 })
                 await ws.send(payload)
@@ -344,9 +454,46 @@ class LMAgentTUI(App[None]):
         self._chat().write(f"[dim]{msg}[/dim]")
 
     def _update_subtitle(self, status: str = "idle") -> None:
-        self.sub_title = f"@{self._persona} — {status}"
+        model = self._model_override or _active_model(self._config)
+        self.sub_title = f"@{self._persona} | {model} | {status}"
 
     # ── Info commands ──────────────────────────────────────────────────────────
+
+    def _show_models(self) -> None:
+        cloud = self._config.backends.cloud
+        local_default = self._config.backends.local.default_model
+        lines: list[str] = ["[bold]Available models:[/bold]", ""]
+
+        lines.append("[dim]Cloud:[/dim]")
+        lines.append(f"  [cyan]{cloud.anthropic.default_model}[/cyan]  (Anthropic)")
+        lines.append(f"  [cyan]{cloud.openai.default_model}[/cyan]  (OpenAI)")
+
+        lines.append("")
+        lines.append("[dim]Local catalog:[/dim]")
+        try:
+            from core.runtime.model_manager import _load_catalog, list_downloaded_models
+            downloaded = {m["id"] for m in list_downloaded_models()}
+            active = local_default or ""
+            for m in _load_catalog():
+                mid = m["id"]
+                if mid in downloaded:
+                    status = "[green]✓[/green]"
+                else:
+                    status = "[dim]·[/dim]"
+                is_active = " [yellow]← active[/yellow]" if mid == active else ""
+                tags = ", ".join(m.get("tags", []))
+                size = f"{m.get('size_gb', '?')} GB"
+                lines.append(
+                    f"  {status} [cyan]{mid}[/cyan]{is_active}\n"
+                    f"       {escape(m.get('description', ''))}"
+                    f"  [dim]{size}  [{tags}][/dim]"
+                )
+        except Exception as exc:
+            lines.append(f"  [red]Could not load catalog: {escape(str(exc))}[/red]")
+
+        lines.append("")
+        lines.append("  Use [bold]/model <id>[/bold] to override for this session.")
+        self._write_system("\n".join(lines))
 
     def _show_persona_info(self) -> None:
         try:

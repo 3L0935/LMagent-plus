@@ -24,7 +24,8 @@ system_prompt: |
 tone: "Clear and natural. Adapt to the user's register."
 
 tools_enabled:
-  - file_ops
+  - name: file_ops
+    when_to_use: "For reading source material and writing output — only tool available"
 
 tools_optional: []
 

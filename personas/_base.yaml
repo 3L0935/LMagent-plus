@@ -47,16 +47,20 @@ system_prompt: |
 tone: "Direct and concise. No unnecessary preamble."
 
 # Tools enabled by default for this persona.
-# Use group aliases: "file_ops" → read_file, write_file, list_directory
-#                   "git"      → git_clone, git_status, git_log
-# Or individual names: bash, read_file, write_file, list_directory, git_clone, git_status, git_log
+# Max 4-5 tools total (enabled + optional) — more degrades tool selection on local models.
+# Each entry has a name and an optional when_to_use hint injected into the system prompt.
+# Group aliases: "file_ops" → read_file, write_file, list_directory
+#                "git"      → git_clone, git_status, git_log
 tools_enabled:
-  - bash
-  - file_ops
+  - name: bash
+    when_to_use: "Fallback only — prefer dedicated tools (file_ops, git) when available"
+  - name: file_ops
+    when_to_use: "For all file read/write operations"
 
 # Tools available but disabled by default (user can enable in the UI)
 tools_optional:
-  - git
+  - name: git
+    when_to_use: "After modifying tracked files, never before"
   # v0.2: web_search, mcp_bridge
 
 # Which PARA memory section to load into {memory_context} at startup

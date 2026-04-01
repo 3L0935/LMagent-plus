@@ -1,5 +1,6 @@
 """
 Backend router — selects and calls the appropriate LLM backend (cloud or local).
+Agent router — maps a task string to a specialized agent name (heuristic, no ML).
 
 Cloud backends (Anthropic, OpenAI) are implemented here.
 Local backend (llama-server) is stubbed — added after Phase 1 merges.
@@ -152,6 +153,69 @@ class Router:
                 raise BackendError(f"OpenAI API error {resp.status_code}: {resp.text}")
             return resp.json()
 
+
+# ---------------------------------------------------------------------------
+# Agent router (heuristic, keyword-based)
+# ---------------------------------------------------------------------------
+
+# Each rule is (keywords, agent_name). First match wins.
+# This is the fallback strategy — the preferred approach is explicit call_agent()
+# tool-calls from the orchestrator's system prompt.
+_ROUTING_RULES: list[tuple[frozenset[str], str]] = [
+    (
+        frozenset({
+            "code", "bug", "function", "class", "module", "file", "git",
+            "patch", "refactor", "implement", "fix", "debug", "test", "compile",
+        }),
+        "coder",
+    ),
+    (
+        frozenset({
+            "research", "analyze", "analysis", "compare", "synthesis", "synthesize",
+            "review", "explain", "investigate", "evaluate", "assess",
+        }),
+        "research",
+    ),
+    (
+        frozenset({
+            "write", "draft", "edit", "rephrase", "proofread", "document",
+            "article", "blog", "summarize", "rewrite", "essay",
+        }),
+        "writer",
+    ),
+]
+
+
+class AgentRouter:
+    """
+    Heuristic agent router — keyword-based, no ML.
+
+    Maps a task string to an agent name by scanning for known keywords.
+    Returns "assistant" when no rule matches.
+
+    This is the fallback routing strategy. The preferred approach is explicit
+    tool-call routing via call_agent() in the orchestrator's system prompt,
+    which does not rely on keyword matching.
+    """
+
+    def route(self, task: str) -> str:
+        """
+        Return the best-matching agent name for the given task string.
+
+        Args:
+            task: Free-text task description from the user.
+
+        Returns:
+            Agent name: "coder", "writer", "research", or "assistant".
+        """
+        task_lower = task.lower()
+        for keywords, agent in _ROUTING_RULES:
+            if any(kw in task_lower for kw in keywords):
+                return agent
+        return "assistant"
+
+
+# ---------------------------------------------------------------------------
 
 def _normalize_anthropic(raw: dict) -> dict:
     """

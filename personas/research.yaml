@@ -25,10 +25,11 @@ system_prompt: |
 tone: "Precise. Use headers and bullet points. Cite sources when possible."
 
 tools_enabled:
-  - file_ops
+  - name: file_ops
+    when_to_use: "To read source documents before analyzing them — always read before reasoning"
 
 tools_optional:
-  # v0.2: web_search
+  # v0.2: {name: web_search, when_to_use: "To fetch live data not present in local files"}
 
 memory_context: "resources"
 

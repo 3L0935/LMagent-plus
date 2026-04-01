@@ -76,11 +76,18 @@ def validate_persona(data: dict) -> None:
         raise ConfigError("'tools_enabled' must be a list")
 
 
-def resolve_tool_names(tools_enabled: list[str]) -> list[str]:
-    """Expand group aliases (file_ops, git) to individual tool names."""
+def resolve_tool_names(tools: list) -> list[str]:
+    """Expand group aliases (file_ops, git) to individual tool names.
+
+    Accepts both legacy string format and new dict format:
+      - "bash"                                     → ["bash"]
+      - {"name": "bash", "when_to_use": "..."}     → ["bash"]
+      - "file_ops"                                 → ["read_file", "write_file", "list_directory"]
+    """
     resolved: list[str] = []
-    for entry in tools_enabled:
-        resolved.extend(TOOL_GROUPS.get(entry, [entry]))
+    for entry in tools:
+        name = entry["name"] if isinstance(entry, dict) else entry
+        resolved.extend(TOOL_GROUPS.get(name, [name]))
     return resolved
 
 
@@ -90,13 +97,24 @@ def get_tools_list_str(persona: dict, tool_registry: ToolRegistry) -> str:
 
     Only lists tools that are both enabled in the persona AND registered
     in the registry — prevents listing unavailable tools in the prompt.
+
+    Includes when_to_use hints when available: persona-level hint takes
+    precedence over the tool's registry-level default.
     """
-    enabled = resolve_tool_names(persona.get("tools_enabled", []))
+    entries = persona.get("tools_enabled", [])
     lines: list[str] = []
-    for name in enabled:
-        tool = tool_registry.get(name)
-        if tool is not None:
-            lines.append(f"- {tool.name}: {tool.description}")
+    for entry in entries:
+        name = entry["name"] if isinstance(entry, dict) else entry
+        persona_hint: str | None = entry.get("when_to_use") if isinstance(entry, dict) else None
+        for resolved_name in TOOL_GROUPS.get(name, [name]):
+            tool = tool_registry.get(resolved_name)
+            if tool is None:
+                continue
+            hint = persona_hint or tool.when_to_use
+            if hint:
+                lines.append(f"- {tool.name}: {tool.description} [use when: {hint}]")
+            else:
+                lines.append(f"- {tool.name}: {tool.description}")
     return "\n".join(lines) if lines else "(no tools available)"
 
 

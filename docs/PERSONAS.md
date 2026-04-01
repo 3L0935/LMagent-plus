@@ -67,13 +67,18 @@ system_prompt: |
 tone: "Direct and concise. No unnecessary preamble."
 
 # Tools enabled by default for this persona
+# Max 4-5 tools total (enabled + optional). See "Why tool limits matter" below.
+# Each tool must declare when_to_use: a one-liner that tells the model WHEN to pick it.
 tools_enabled:
-  - bash
-  - file_ops
+  - name: bash
+    when_to_use: "Fallback only — prefer dedicated tools (file_ops, git) when available"
+  - name: file_ops
+    when_to_use: "For all file read/write operations"
 
 # Tools available but disabled by default (user can enable in the UI)
 tools_optional:
-  - git
+  - name: git
+    when_to_use: "After modifying tracked files, never before"
   # v0.2: web_search, mcp_bridge
 
 # Which part of PARA memory to load into context at startup
@@ -143,17 +148,75 @@ At runtime, before sending the prompt to the LLM, `core/agent.py` replaces:
 
 ---
 
+## Why tool limits matter
+
+Local models have a bounded decision capacity. Tool selection is a classification problem:
+the model must pick one tool from N options. The relationship is non-linear:
+
+- 4 tools → reliable choice, low confusion
+- 10 tools → degraded reliability, occasional wrong tool
+- 20 tools → frequent hallucination, invented tool names
+
+A persona is not just a config file — it's a **cognitive filter**. Its job is to
+pre-select a small, coherent toolset so the model never faces a large decision space.
+
+The `when_to_use` field reinforces this: instead of a bare tool list, the model
+receives explicit selection criteria. This makes the right choice obvious even for
+smaller quantized models (4–8B parameters).
+
+**Rule of thumb:** if you need more than 5 tools to cover the persona's use cases,
+split it into two specialized personas.
+
+---
+
 ## System prompt writing rules
 
 These rules apply to all personas. Following them ensures reliable behavior
 with common local models (Qwen, Mistral, DeepSeek, Llama).
 
 1. **List tools explicitly** — do not assume the model knows what is available
-2. **Explicitly forbid improvisation** — "if the tool does not exist, report it"
-3. **Confirmation rules for destructive actions** — rm, overwrite, etc.
-4. **Direct tone** — local models follow short, precise instructions better
-5. **Do not overload** — a 500-token system prompt outperforms a 2000-token one
-6. **Test with the fallback model** — if it works with the small model, it will work with the large one
+2. **Add `when_to_use` to every tool** — tells the model exactly when to pick it
+3. **Maximum 4–5 tools per persona** — more than 5 degrades tool selection reliability on local models
+4. **Explicitly forbid improvisation** — "if the tool does not exist, report it"
+5. **Confirmation rules for destructive actions** — rm, overwrite, etc.
+6. **Direct tone** — local models follow short, precise instructions better
+7. **Do not overload** — a 500-token system prompt outperforms a 2000-token one
+8. **Test with the fallback model** — if it works with the small model, it will work with the large one
+
+---
+
+---
+
+## Analyse d'impact
+
+### `when_to_use` dans les personas
+**Statut :** RECOMMENDED
+
+**Raison :**
+`when_to_use` est une amélioration de fiabilité, pas un prérequis structurel.
+Phase 4 (Memory) et Phase 5 (CLI) n'en dépendent pas — elles opèrent au niveau
+du pipeline de prompt (`memory_hook`, `tools_hook`) sans connaître les hints individuels.
+Les personas actuels ont tous ≤ 3 outils, donc le risque d'hallucination est déjà faible.
+À implémenter idéalement en Phase 2.5 quand on touche au registre d'outils pour le routing.
+
+**À faire :**
+- Documenter `when_to_use` comme champ attendu dans `tool_registry.py` (schema JSON)
+- Mettre à jour les 4 personas existants avec des hints quand Phase 2.5 démarre
+- Pour l'instant : la doc est à jour, le code peut attendre
+
+### Limite 4–5 outils
+**Statut :** RECOMMENDED
+
+**État actuel :**
+- `coder.yaml` : 3 outils (bash, file_ops, git) ✓
+- `writer.yaml` : 1 outil (file_ops) ✓
+- `research.yaml` : 1 outil (file_ops) ✓
+- `assistant.yaml` : 3 outils (bash, file_ops + git optional) ✓
+
+**Raison :**
+Tous les personas respectent déjà la limite. La règle est donc préventive —
+elle empêche la dérive lors de l'ajout de nouveaux outils (web_search, mcp_bridge en v0.2).
+La documenter maintenant est peu coûteux et évite un problème futur.
 
 ---
 

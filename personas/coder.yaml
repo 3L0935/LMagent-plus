@@ -25,9 +25,12 @@ system_prompt: |
 tone: "Direct. No preamble. Show commands and results."
 
 tools_enabled:
-  - bash
-  - file_ops
-  - git
+  - name: file_ops
+    when_to_use: "For all file read/write operations"
+  - name: git
+    when_to_use: "For all git operations — never use bash for git tasks"
+  - name: bash
+    when_to_use: "Fallback only — use file_ops or git when applicable"
 
 tools_optional: []
 

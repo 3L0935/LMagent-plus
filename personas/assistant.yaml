@@ -23,11 +23,16 @@ system_prompt: |
 tone: "Friendly and direct. Match the user's level of formality."
 
 tools_enabled:
-  - bash
-  - file_ops
+  - name: call_agent
+    when_to_use: "When the task clearly belongs to a specialized domain (code → coder, writing → writer, research → research) — prefer this over handling it yourself"
+  - name: file_ops
+    when_to_use: "Only for quick reads or writes that do not warrant delegating to a specialist"
+  - name: bash
+    when_to_use: "For shell commands and system operations not covered by other tools"
 
 tools_optional:
-  - git
+  - name: git
+    when_to_use: "When the task explicitly involves git operations"
 
 memory_context: "all"
 

@@ -48,6 +48,7 @@ GIT_CLONE_TOOL = ToolDefinition(
         "additionalProperties": False,
     },
     handler=lambda p: git_clone(p["url"], p["dest"]),
+    when_to_use="To clone a remote repository — only when the repo does not yet exist locally",
 )
 
 GIT_STATUS_TOOL = ToolDefinition(
@@ -62,6 +63,7 @@ GIT_STATUS_TOOL = ToolDefinition(
         "additionalProperties": False,
     },
     handler=lambda p: git_status(p["repo_path"]),
+    when_to_use="To check repository state before committing or after making changes",
 )
 
 GIT_LOG_TOOL = ToolDefinition(
@@ -77,4 +79,5 @@ GIT_LOG_TOOL = ToolDefinition(
         "additionalProperties": False,
     },
     handler=lambda p: git_log(p["repo_path"], p.get("n", 10)),
+    when_to_use="To inspect recent commit history",
 )

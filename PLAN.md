@@ -66,11 +66,35 @@ Can run in parallel with Phase 1 (`feat/agent-loop` worktree).
 - `[x]` Wire `core/daemon.py` WebSocket server to dispatch IPC messages to the agent loop
 - `[x]` `tests/test_agent.py` — mocked LLM responses, verify tool call parsing and loop behavior
 - `[x]` `tests/test_tool_registry.py`
+- `[x]` Add `when_to_use` hints to all tools in the registry schema
+  > Tool hints are a high-leverage, low-cost reliability improvement. Prioritize before adding more tools.
+- `[ ]` Implement structured JSON task payload schema for agent-to-agent delegation (deferred to Phase 2.5)
 
 **Exit criterion:** Three base use cases work without hallucinated tool calls:
 1. "List files in current directory" → uses bash
 2. "Read this file and summarize it" → uses file_ops
 3. "Clone this repo into ~/test then list its files" → uses git + bash
+
+---
+
+### Phase 2.5 — Multi-agent routing `[x]`
+
+**Goal:** `@assistant` can delegate tasks to specialized agents via a structured tool-call.
+Depends on: Phase 2 complete.
+Worktree: `feat/routing` (can share `feat/agent-loop` if not yet cleaned up).
+
+- `[x]` `call_agent()` tool in the tool registry (`core/tools/call_agent.py`)
+- `[x]` Structured JSON task payload schema (validated by `tool_registry.py`)
+- `[x]` Heuristic router (rules-based, no ML) as default routing strategy in `core/router.py`
+- `[x]` `@assistant` persona updated to use `call_agent` as primary delegation tool
+- `[x]` `when_to_use` hints added to all tools in the registry schema
+
+> **Note:** `when_to_use` hints (from Phase 2 above) are implemented here, not in Phase 2,
+> because they are most valuable when the agent must choose among multiple agent-tools.
+> Single-agent personas with ≤ 3 tools do not require them to pass the Phase 2 exit criterion.
+
+**Exit criterion:** "fix the bug in auth.py" → `@assistant` calls `call_agent("coder", {task: ..., files: [...]})`
+→ `@coder` completes the task. No free-text routing, no wrong-agent dispatch.
 
 ---
 

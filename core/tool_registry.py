@@ -23,6 +23,7 @@ class ToolDefinition:
     description: str
     input_schema: dict  # JSON Schema (type: object)
     handler: Callable[[dict], Any]  # async callable
+    when_to_use: str | None = None  # optional hint injected into the system prompt
 
 
 class ToolRegistry:

@@ -189,6 +189,23 @@ def test_resolve_tool_names_mixed():
     assert result == ["bash"] + TOOL_GROUPS["file_ops"]
 
 
+def test_resolve_tool_names_dict_format():
+    """Dict entries with when_to_use are resolved identically to plain strings."""
+    result = resolve_tool_names([{"name": "bash", "when_to_use": "fallback only"}])
+    assert result == ["bash"]
+
+
+def test_resolve_tool_names_dict_group():
+    result = resolve_tool_names([{"name": "file_ops", "when_to_use": "for files"}])
+    assert result == TOOL_GROUPS["file_ops"]
+
+
+def test_resolve_tool_names_mixed_formats():
+    """Legacy string and new dict entries can coexist in the same list."""
+    result = resolve_tool_names(["bash", {"name": "file_ops", "when_to_use": "for files"}])
+    assert result == ["bash"] + TOOL_GROUPS["file_ops"]
+
+
 # ---------------------------------------------------------------------------
 # get_tools_list_str
 # ---------------------------------------------------------------------------
@@ -221,6 +238,51 @@ def test_get_tools_list_str_empty_registry():
     persona = {**MINIMAL_PERSONA, "tools_enabled": ["bash"]}
     result = get_tools_list_str(persona, ToolRegistry())
     assert result == "(no tools available)"
+
+
+def test_get_tools_list_str_dict_with_hint(minimal_registry: ToolRegistry):
+    """Persona-level when_to_use hint appears in the formatted string."""
+    persona = {**MINIMAL_PERSONA, "tools_enabled": [
+        {"name": "bash", "when_to_use": "fallback only"}
+    ]}
+    result = get_tools_list_str(persona, minimal_registry)
+    assert "bash" in result
+    assert "fallback only" in result
+    assert "[use when:" in result
+
+
+def test_get_tools_list_str_dict_without_hint(minimal_registry: ToolRegistry):
+    """Dict entry without when_to_use falls back to ToolDefinition.when_to_use."""
+    registry = ToolRegistry()
+    registry.register(ToolDefinition(
+        name="bash",
+        description="Execute a shell command.",
+        input_schema={"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]},
+        handler=AsyncMock(return_value={}),
+        when_to_use="registry-level hint",
+    ))
+    persona = {**MINIMAL_PERSONA, "tools_enabled": [{"name": "bash"}]}
+    result = get_tools_list_str(persona, registry)
+    assert "registry-level hint" in result
+    assert "[use when:" in result
+
+
+def test_get_tools_list_str_persona_hint_overrides_registry(minimal_registry: ToolRegistry):
+    """Persona-level hint takes precedence over registry-level hint."""
+    registry = ToolRegistry()
+    registry.register(ToolDefinition(
+        name="bash",
+        description="Execute a shell command.",
+        input_schema={"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]},
+        handler=AsyncMock(return_value={}),
+        when_to_use="registry hint",
+    ))
+    persona = {**MINIMAL_PERSONA, "tools_enabled": [
+        {"name": "bash", "when_to_use": "persona hint"}
+    ]}
+    result = get_tools_list_str(persona, registry)
+    assert "persona hint" in result
+    assert "registry hint" not in result
 
 
 # ---------------------------------------------------------------------------

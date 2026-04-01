@@ -67,6 +67,7 @@ READ_FILE_TOOL = ToolDefinition(
         "additionalProperties": False,
     },
     handler=lambda p: read_file(p["path"]),
+    when_to_use="To read any file before analyzing or modifying it",
 )
 
 WRITE_FILE_TOOL = ToolDefinition(
@@ -82,6 +83,7 @@ WRITE_FILE_TOOL = ToolDefinition(
         "additionalProperties": False,
     },
     handler=lambda p: write_file(p["path"], p["content"]),
+    when_to_use="To create or overwrite a file — always read first if the file already exists",
 )
 
 LIST_DIRECTORY_TOOL = ToolDefinition(
@@ -96,4 +98,5 @@ LIST_DIRECTORY_TOOL = ToolDefinition(
         "additionalProperties": False,
     },
     handler=lambda p: list_directory(p["path"]),
+    when_to_use="To explore directory structure and discover files",
 )

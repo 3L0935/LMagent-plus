@@ -176,6 +176,103 @@ Scopes : core | gui | cli | memory | runtime | personas | installer | web
 
 ---
 
+## Multi-agent architecture (Phase 2.5)
+
+> This section documents the planned architecture. No multi-agent code exists yet.
+> Implementation target: Phase 2.5.
+
+### Delegation pattern
+
+The key insight is to decompose large decision spaces into small sequential ones:
+
+```
+User → @assistant (orchestrator)
+           ↓
+    selects 1 agent        ← simple decision (1 of N agents)
+           ↓
+    selects among 4 tools  ← simple decision (1 of 4 tools)
+```
+
+Instead of: selecting among 25 tools in one shot.
+
+Each specialized agent (`@coder`, `@research`, `@writer`) has:
+- Its own model (can differ per agent — Qwen for coder, DeepSeek for research)
+- Its own curated toolset (≤ 5 tools, see `docs/PERSONAS.md`)
+- Its own memory context (loaded from the relevant PARA categories)
+
+### Orchestrator tools
+
+`@assistant` (the orchestrator) has access to a special delegation tool:
+
+```python
+call_agent(name: str, payload: dict) → dict
+```
+
+### Structured task payload
+
+Messages between agents must be structured JSON, not free text.
+Free text loses context across hops; structured payloads are unambiguous:
+
+```json
+{
+  "task": "fix bug in auth middleware",
+  "files": ["auth.py"],
+  "constraints": ["do not change the public API"],
+  "context": "Bug causes 401 on valid tokens after session refresh"
+}
+```
+
+The `call_agent` tool validates this schema before dispatching.
+
+### Routing strategies
+
+In order of reliability:
+
+1. **Explicit tool-call** — `call_agent("coder", payload)` — most reliable.
+   The orchestrator's system prompt lists agents the same way other personas list tools.
+   Selection is a tool-call, not a free-text reasoning step.
+
+2. **Heuristic router** — simple rules, no ML:
+   - "if task mentions file/code/git → @coder"
+   - "if task mentions search/analysis/synthesis → @research"
+   - "if task is prose/writing → @writer"
+   Implemented as a `router.py` fallback when `call_agent` is unavailable.
+
+3. **Classification model** — dedicated LLM for intent detection. Out of scope for v0.1.
+
+> **Warning — main failure point**
+>
+> Agent routing is the single most critical point of failure in multi-agent systems.
+> If `@assistant` picks the wrong agent, everything downstream breaks.
+> Prefer strategy 1 (explicit tool-call) at all times.
+> Strategy 2 is a fallback, not a default.
+
+---
+
+## Analyse d'impact
+
+### Multi-agent architecture
+**Statut :** FUTURE (Phase 2.5)
+
+**Raison :**
+Il n'existe aucun code multi-agent aujourd'hui. `call_agent()` n'est pas implémenté,
+`router.py` fait uniquement du routing local/cloud (pas inter-agents).
+Phase 4 (Memory) et Phase 5 (CLI) fonctionnent entièrement dans le modèle single-agent.
+La documenter maintenant clarifie l'intention architecturale sans bloquer quoi que ce soit.
+
+**Dépendances :**
+- Phase 2 (outil registry) : déjà complète — fournit la base pour enregistrer `call_agent`
+- Phase 3 (personas) : déjà complète — fournit le format YAML qui définira `@assistant` comme orchestrateur
+- Nouveau fichier `core/tools/call_agent.py` à créer en Phase 2.5
+- Mise à jour de `personas/assistant.yaml` pour utiliser `call_agent` comme outil primaire
+
+**Blocker pour :**
+- Phase 4 (Memory) ? **Non** — la mémoire est single-agent, pas inter-agents
+- Phase 5 (CLI) ? **Non** — le CLI n'a pas besoin de routing multi-agent pour fonctionner
+- Phase 2.5 lui-même ? **Oui** — c'est l'objet de la phase
+
+---
+
 ## What an agent can do without confirmation
 
 - Read any file in the repo or in `~/.lmagent-plus/`

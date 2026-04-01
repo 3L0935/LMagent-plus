@@ -106,3 +106,19 @@ class TestToolRegistryApiFormat:
         registry.register(tool)
         api = registry.to_api_format()
         assert api[0]["function"]["parameters"] == tool.input_schema
+
+
+class TestToolDefinitionWhenToUse:
+    def test_when_to_use_defaults_to_none(self):
+        tool = _make_tool("t")
+        assert tool.when_to_use is None
+
+    def test_when_to_use_can_be_set(self):
+        tool = ToolDefinition(
+            name="bash",
+            description="Execute a shell command.",
+            input_schema={"type": "object", "properties": {}, "required": []},
+            handler=AsyncMock(return_value={}),
+            when_to_use="Fallback only — prefer dedicated tools",
+        )
+        assert tool.when_to_use == "Fallback only — prefer dedicated tools"

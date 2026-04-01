@@ -73,4 +73,5 @@ BASH_TOOL = ToolDefinition(
         "additionalProperties": False,
     },
     handler=_handler,
+    when_to_use="Fallback only — use file_ops for file operations and git tools for git operations",
 )

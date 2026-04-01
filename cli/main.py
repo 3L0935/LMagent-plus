@@ -812,13 +812,14 @@ class LMAgentTUI(App[None]):
             f"  preferences.md — language=[cyan]{escape(language)}[/cyan], "
             f"interests=[cyan]{escape(interests)}[/cyan]"
         )
+        status_lines.append(
+            "\nUse [bold]/reload[/bold] to restart the daemon and apply changes."
+        )
         self._write_system("\n".join(status_lines))
 
         # Download llama-server + models only for local/auto routing
         if routing in ("local", "auto"):
             asyncio.create_task(self._wizard_download_server(backend, to_dl))
-        else:
-            self._write_system("[green]Setup complete.[/green]  Cloud routing active.")
 
     async def _wizard_download_server(self, backend: str, models_to_dl: list[str]) -> None:
         """Download llama-server binary then kick off model downloads."""
@@ -850,9 +851,7 @@ class LMAgentTUI(App[None]):
             asyncio.create_task(self._download_and_reload(model_id))
 
         if not models_to_dl:
-            self._write_system(
-                "[green]Setup complete.[/green]  Use [bold]/reload[/bold] to restart the daemon and apply changes."
-            )
+            self._write_system("[green]llama-server ready — no models to download.[/green]")
 
     # ── Model download + hot-reload ───────────────────────────────────────────
 

@@ -247,7 +247,7 @@ class TestDownloadLlamaServer:
         zip_bytes = buf.getvalue()
 
         fake_asset = {
-            "name": "llama-b1234-bin-ubuntu-x64-vulkan.zip",
+            "name": "llama-b1234-bin-ubuntu-vulkan-x64.zip",
             "size": len(zip_bytes),
             "browser_download_url": "http://fake/download",
         }
@@ -372,66 +372,6 @@ class TestRecommendModels:
         # big-model needs 16 GB VRAM — not in GPU matches for 8 GB VRAM
         # mid and small need 4 GB — both in GPU matches
         assert all(mid in result for mid in gpu_ids)
-
-
-class TestDownloadModel:
-    @pytest.mark.asyncio
-    async def test_returns_existing_file_without_download(self, tmp_path):
-        from core.runtime.model_manager import download_model
-
-        model_dir = tmp_path / "my-model"
-        model_dir.mkdir()
-        target = model_dir / "model.gguf"
-        target.write_bytes(b"fake")
-
-        progress: list[float] = []
-
-        with patch("core.runtime.model_manager.MODELS_DIR", tmp_path):
-            result = await download_model(
-                repo_id="org/repo",
-                filename="model.gguf",
-                dest=Path("my-model"),
-                on_progress=progress.append,
-            )
-
-        assert result == target
-        assert progress == [1.0]
-
-    @pytest.mark.asyncio
-    async def test_calls_hf_hub_download(self, tmp_path):
-        from core.runtime.model_manager import download_model
-
-        cached_file = tmp_path / "cached.gguf"
-        cached_file.write_bytes(b"model data")
-
-        with (
-            patch("core.runtime.model_manager.MODELS_DIR", tmp_path),
-            patch("core.runtime.model_manager.hf_hub_download", return_value=str(cached_file)) as mock_dl,
-        ):
-            result = await download_model(
-                repo_id="org/repo",
-                filename="model.gguf",
-                dest=Path("new-model"),
-            )
-
-        mock_dl.assert_called_once()
-        assert result == tmp_path / "new-model" / "model.gguf"
-
-    @pytest.mark.asyncio
-    async def test_raises_lmagent_error_on_failure(self, tmp_path):
-        from core.runtime.model_manager import download_model
-        from core.errors import LMAgentError
-
-        with (
-            patch("core.runtime.model_manager.MODELS_DIR", tmp_path),
-            patch("core.runtime.model_manager.hf_hub_download", side_effect=Exception("network error")),
-        ):
-            with pytest.raises(LMAgentError, match="Failed to download"):
-                await download_model(
-                    repo_id="org/repo",
-                    filename="model.gguf",
-                    dest=Path("fail-model"),
-                )
 
 
 # ── LocalBackendManager idle unload ──────────────────────────────────────────

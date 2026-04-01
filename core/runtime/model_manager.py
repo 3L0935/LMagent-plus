@@ -1,18 +1,16 @@
 """
-Model catalog management and HuggingFace download for LMAgent-Plus.
+Model catalog management for LMAgent-Plus.
 
-Loads the recommended model list from installer/models/recommended.yaml,
-filters by available hardware, and downloads models via huggingface_hub.
+Loads the recommended model list from installer/models/recommended.yaml
+and filters by available hardware.
+Downloads are handled by cli/main.py:_download_model_httpx (httpx streaming).
 """
 
 from __future__ import annotations
 
-import importlib.resources
 from pathlib import Path
-from typing import Callable
 
 import yaml
-from huggingface_hub import hf_hub_download
 
 from core.errors import LMAgentError
 
@@ -72,62 +70,6 @@ def recommend_models(vram_gb: float, ram_gb: float) -> list[str]:
     cpu_matches.sort(key=lambda x: x[0])
 
     return [mid for _, mid in gpu_matches] + [mid for _, mid in cpu_matches]
-
-
-async def download_model(
-    repo_id: str,
-    filename: str,
-    dest: Path,
-    on_progress: Callable[[float], None] | None = None,
-) -> Path:
-    """
-    Download a .gguf model file from HuggingFace Hub.
-
-    Automatically resumes interrupted downloads (handled by huggingface_hub).
-    Stores to: ~/.lmagent-plus/models/<dest>/model.gguf
-    The `dest` argument is used as the model directory name inside MODELS_DIR.
-
-    Args:
-        repo_id: HuggingFace repository ID (e.g. "Qwen/Qwen3-Coder-8B-Instruct-GGUF").
-        filename: Filename within the repo (e.g. "qwen3-coder-8b-instruct-q4_k_m.gguf").
-        dest: Directory name under ~/.lmagent-plus/models/ (usually the model ID).
-        on_progress: Optional callback receiving progress 0.0–1.0. Note: huggingface_hub
-                     uses tqdm internally; this callback is called once with 1.0 on completion.
-
-    Returns:
-        Path to the downloaded .gguf file.
-
-    Raises:
-        LMAgentError: On download failure.
-    """
-    model_dir = MODELS_DIR / dest
-    model_dir.mkdir(parents=True, exist_ok=True)
-    target = model_dir / "model.gguf"
-
-    if target.exists():
-        if on_progress:
-            on_progress(1.0)
-        return target
-
-    try:
-        # hf_hub_download resumes automatically and caches in HF_HOME.
-        # We move the cached file to our target location.
-        cached_path = hf_hub_download(
-            repo_id=repo_id,
-            filename=filename,
-            local_dir=str(model_dir),
-            local_dir_use_symlinks=False,
-        )
-        cached = Path(cached_path)
-        if cached != target:
-            cached.rename(target)
-    except Exception as exc:
-        raise LMAgentError(f"Failed to download {repo_id}/{filename}: {exc}") from exc
-
-    if on_progress:
-        on_progress(1.0)
-
-    return target
 
 
 def get_model_path(model_id: str) -> Path | None:

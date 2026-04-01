@@ -515,7 +515,7 @@ class LMAgentTUI(App[None]):
 
         try:
             from core.runtime.backend_detector import detect_best_backend, BACKEND_DESCRIPTIONS
-            best, statuses = await asyncio.get_event_loop().run_in_executor(
+            best, statuses = await asyncio.get_running_loop().run_in_executor(
                 None, detect_best_backend
             )
         except Exception as exc:
@@ -612,12 +612,13 @@ class LMAgentTUI(App[None]):
         language  = self._wizard_data["language"]
         interests = self._wizard_data["interests"]
 
-        # Update backends.local.backend in config.yaml
+        # Update backends.local.backend + routing.default in config.yaml
         from core.config import CONFIG_PATH
         try:
             with CONFIG_PATH.open() as f:
                 raw = yaml.safe_load(f) or {}
             raw.setdefault("backends", {}).setdefault("local", {})["backend"] = backend
+            raw.setdefault("routing", {})["default"] = "local"
             with CONFIG_PATH.open("w") as f:
                 yaml.dump(raw, f, default_flow_style=False, allow_unicode=True)
         except Exception as exc:
@@ -640,7 +641,7 @@ class LMAgentTUI(App[None]):
 
         self._write_system(
             "[green]Setup complete.[/green]\n"
-            f"  config.yaml — backend set to [cyan]{backend}[/cyan]\n"
+            f"  config.yaml — backend=[cyan]{backend}[/cyan], routing=[cyan]local[/cyan]\n"
             f"  preferences.md — language=[cyan]{escape(language)}[/cyan], "
             f"interests=[cyan]{escape(interests)}[/cyan]\n"
             "  [dim]Restart the daemon to use the new backend.[/dim]"

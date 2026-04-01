@@ -14,7 +14,7 @@ Slash commands
 /models            List available models (cloud + local catalog)
 /hf [query]        Search HuggingFace for GGUF models
 /setup             Setup wizard — backend, language, interests
-/reload            Apply current model override to next message
+/reload            Restart the daemon (applies config changes)
 /clear             Clear chat history (current tab)
 /stop              Cancel the current response  (same as ESC)
 /status            Daemon connection info
@@ -73,7 +73,7 @@ HELP_TEXT = """\
   [bold]/models[/bold]            List available models (cloud + local catalog)
   [bold]/hf[/bold] \\[query]       Search HuggingFace for GGUF models
   [bold]/setup[/bold]             Setup wizard — backend, language, interests
-  [bold]/reload[/bold]            Apply current model override to next message
+  [bold]/reload[/bold]            Restart the daemon (applies config/backend changes)
   [bold]/clear[/bold]             Clear chat history (current tab)
   [bold]/stop[/bold]              Cancel current response  (same as [bold]ESC[/bold])
   [bold]/status[/bold]            Daemon connection info
@@ -350,10 +350,7 @@ class LMAgentTUI(App[None]):
             await self._handle_model_cmd(args)
 
         elif cmd == "reload":
-            if self._model_override:
-                self._do_reload()
-            else:
-                self._write_system("[dim]No model override set — nothing to reload.[/dim]")
+            asyncio.create_task(self._restart_daemon())
 
         elif cmd == "status":
             self._show_connection_status()
@@ -854,7 +851,7 @@ class LMAgentTUI(App[None]):
 
         if not models_to_dl:
             self._write_system(
-                "[green]Setup complete.[/green]  Restart the daemon to use the new backend."
+                "[green]Setup complete.[/green]  Use [bold]/reload[/bold] to restart the daemon and apply changes."
             )
 
     # ── Model download + hot-reload ───────────────────────────────────────────
@@ -915,6 +912,33 @@ class LMAgentTUI(App[None]):
             )
         except Exception as exc:
             self._write_error(f"Daemon reload failed: {escape(str(exc))}")
+
+    async def _restart_daemon(self) -> None:
+        """Send daemon.restart IPC then wait for the daemon to come back up."""
+        uri = f"ws://127.0.0.1:{self._config.daemon.port}"
+        self._write_system("[yellow]Restarting daemon…[/yellow]")
+        try:
+            async with websockets.connect(uri, open_timeout=5) as ws:
+                await ws.send(json.dumps({
+                    "jsonrpc": "2.0", "method": "daemon.restart", "id": "restart",
+                }))
+                await asyncio.wait_for(ws.recv(), timeout=5)
+        except Exception:
+            pass  # daemon closes the connection as it restarts — that's fine
+
+        # Poll until daemon is back (up to 10 s)
+        for _ in range(20):
+            await asyncio.sleep(0.5)
+            try:
+                async with websockets.connect(uri, open_timeout=1) as ws:
+                    await ws.send(json.dumps({"jsonrpc": "2.0", "method": "poll", "id": "ping"}))
+                    await asyncio.wait_for(ws.recv(), timeout=2)
+                self._write_system("[green]Daemon ready.[/green]")
+                return
+            except Exception:
+                continue
+
+        self._write_error("Daemon did not come back up within 10 s.")
 
     async def _send_model_reload(self, model_id: str) -> None:
         """Send model.reload IPC to the daemon and wait for confirmation."""

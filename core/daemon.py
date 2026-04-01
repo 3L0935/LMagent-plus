@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import sys
 from datetime import date
 from typing import TYPE_CHECKING
 
@@ -158,6 +160,14 @@ async def run_daemon(
                 await websocket.send(
                     RPCResponse.err(req_id, INTERNAL_ERROR, str(exc)).model_dump_json()
                 )
+            return
+
+        if method == "daemon.restart":
+            await websocket.send(RPCResponse.ok(req_id, {"status": "restarting"}).model_dump_json())
+            async def _do_restart() -> None:
+                await asyncio.sleep(0.3)
+                os.execv(sys.executable, sys.argv)
+            asyncio.create_task(_do_restart())
             return
 
         error_resp = RPCResponse.err(id=req_id, code=INVALID_REQUEST, message=f"Unknown method: {method!r}")

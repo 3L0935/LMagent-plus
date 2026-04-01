@@ -10,10 +10,12 @@ Slash commands
 /agent [name]      Switch active agent
 /persona           Show active persona info
 /tools             List enabled tools for the active agent
-/model [name]      Override model — prompts for immediate reload or use /reload later
+/model [name]      Load a model — downloads if needed, hot-reloads daemon (local routing)
 /models            List available models (cloud + local catalog)
+/hf [query]        Search HuggingFace for GGUF models
+/setup             Setup wizard — backend, language, interests
 /reload            Apply current model override to next message
-/clear             Clear chat history
+/clear             Clear chat history (current tab)
 /stop              Cancel the current response  (same as ESC)
 /status            Daemon connection info
 
@@ -21,7 +23,7 @@ Keyboard
 --------
 ESC        Cancel current response
 Ctrl+C     Quit
-p          Toggle dark/light theme
+Ctrl+P     Theme palette (native Textual)
 """
 
 from __future__ import annotations
@@ -30,20 +32,23 @@ import asyncio
 import json
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+import httpx
 import websockets
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Footer, Header, Input, RichLog, Static
+from textual.widgets import Footer, Header, Input, RichLog, Static, TabbedContent, TabPane
 
 from core.config import Config
 
 _CLI_STATE = Path.home() / ".lmagent-plus" / "cli_state.json"
+_USER_DIR   = Path.home() / ".lmagent-plus"
 
 SLASH_COMMANDS = [
-    "/help", "/agent", "/persona", "/tools", "/model", "/models",
+    "/help", "/agent", "/persona", "/tools",
+    "/model", "/models", "/hf", "/setup",
     "/reload", "/clear", "/stop", "/status",
 ]
 
@@ -63,21 +68,31 @@ HELP_TEXT = """\
   [bold]/agent[/bold] \\[name]     Switch active agent (assistant | coder | writer | research)
   [bold]/persona[/bold]           Show active persona info
   [bold]/tools[/bold]             List enabled tools for the active agent
-  [bold]/model[/bold] \\[name]     Override model — prompts to reload now or use /reload later
-  [bold]/models[/bold]           List available models (cloud + local catalog)
+  [bold]/model[/bold] \\[name]     Load a model — downloads if needed, hot-reloads daemon (local)
+  [bold]/models[/bold]            List available models (cloud + local catalog)
+  [bold]/hf[/bold] \\[query]       Search HuggingFace for GGUF models
+  [bold]/setup[/bold]             Setup wizard — backend, language, interests
   [bold]/reload[/bold]            Apply current model override to next message
-  [bold]/clear[/bold]             Clear chat history
+  [bold]/clear[/bold]             Clear chat history (current tab)
   [bold]/stop[/bold]              Cancel current response  (same as [bold]ESC[/bold])
   [bold]/status[/bold]            Daemon connection info
 
-[dim]Keyboard:[/dim]  ESC = cancel   Ctrl+C = quit   p = theme\
+[dim]Keyboard:[/dim]  ESC = cancel   Ctrl+C = quit   Ctrl+P = theme\
 """
 
 CSS = """
+TabbedContent {
+    height: 1fr;
+    margin: 0 1;
+}
+
+TabPane {
+    padding: 0;
+}
+
 RichLog {
     height: 1fr;
     border: solid $primary-darken-2;
-    margin: 0 1;
     padding: 0 1;
     scrollbar-gutter: stable;
 }
@@ -132,6 +147,48 @@ def format_tool_result(name: str, output: dict) -> str:
         return str(output)[:400]
 
 
+async def _download_model_httpx(
+    repo_id: str,
+    filename: str,
+    dest_dir: Path,
+    on_progress: "Callable[[int, int], None] | None" = None,
+) -> Path:
+    """
+    Stream a GGUF file directly from HuggingFace via httpx.
+
+    Bypasses hf_hub_download (which spawns git-lfs subprocesses and can
+    trigger 'bad value(s) in fds_to_keep' on some Linux setups).
+
+    Args:
+        on_progress: called with (bytes_downloaded, total_bytes) each chunk.
+
+    Returns:
+        Path to the downloaded model.gguf file.
+    """
+    url    = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    target = dest_dir / "model.gguf"
+    tmp    = dest_dir / "model.gguf.part"
+
+    if target.exists():
+        return target
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=None) as client:
+        async with client.stream("GET", url) as resp:
+            resp.raise_for_status()
+            total     = int(resp.headers.get("content-length", 0))
+            received  = 0
+            with tmp.open("wb") as f:
+                async for chunk in resp.aiter_bytes(65536):
+                    f.write(chunk)
+                    received += len(chunk)
+                    if on_progress:
+                        on_progress(received, total)
+
+    tmp.rename(target)
+    return target
+
+
 # ---------------------------------------------------------------------------
 # Textual app
 # ---------------------------------------------------------------------------
@@ -153,13 +210,23 @@ class LMAgentTUI(App[None]):
         self._ws_task: asyncio.Task[None] | None = None
         self._streaming = False
         self._reload_confirm_pending = False
+        # Download flow
+        self._download_confirm_pending = False
+        self._pending_download_id: str | None = None
+        # Setup wizard
+        self._wizard_active = False
+        self._wizard_step = 0
+        self._wizard_data: dict[str, Any] = {}
+        self._wizard_backends: list[str] = []
         super().__init__()
 
     # ── Composition ────────────────────────────────────────────────────────────
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield RichLog(markup=True, highlight=False, wrap=True, id="chat")
+        with TabbedContent(id="agent-tabs"):
+            with TabPane("@assistant", id="tab-assistant"):
+                yield RichLog(markup=True, highlight=False, wrap=True, id="chat-assistant")
         yield Static("", id="completions", markup=True)
         yield Input(placeholder="Type a message or /help…", id="input")
         yield Footer()
@@ -185,6 +252,22 @@ class LMAgentTUI(App[None]):
         text = event.value.strip()
         event.input.clear()
         if not text:
+            return
+
+        # Wizard intercept (highest priority)
+        if self._wizard_active:
+            await self._handle_wizard_input(text)
+            return
+
+        # Download confirmation intercept
+        if self._download_confirm_pending:
+            self._download_confirm_pending = False
+            if text.lower() in ("y", "yes") and self._pending_download_id:
+                asyncio.create_task(self._download_and_reload(self._pending_download_id))
+                self._pending_download_id = None
+            else:
+                self._write_system("[dim]Download cancelled.[/dim]")
+                self._pending_download_id = None
             return
 
         # y/n intercept for model reload confirmation
@@ -216,7 +299,7 @@ class LMAgentTUI(App[None]):
             await self.action_cancel_response()
 
         elif cmd == "clear":
-            self.query_one("#chat", RichLog).clear()
+            self._chat().clear()
 
         elif cmd == "agent":
             if not args:
@@ -233,6 +316,8 @@ class LMAgentTUI(App[None]):
                     )
                 else:
                     self._persona = name
+                    self._ensure_agent_tab(name)
+                    self._switch_to_agent_tab(name)
                     self._update_subtitle()
                     self._write_system(f"Switched to [green]@{self._persona}[/green]")
 
@@ -245,18 +330,21 @@ class LMAgentTUI(App[None]):
         elif cmd == "models":
             self._show_models()
 
-        elif cmd == "model":
-            if not args:
-                current = self._model_override or "(default from config)"
-                self._write_system(f"Current model override: [cyan]{current}[/cyan]")
-            else:
-                self._model_override = args[0]
-                self._update_subtitle()
-                self._reload_confirm_pending = True
+        elif cmd == "hf":
+            query = " ".join(args).strip()
+            if not query:
                 self._write_system(
-                    f"Model override set: [cyan]{escape(self._model_override)}[/cyan]\n"
-                    "[yellow]Reload now? [y/n][/yellow]  (or use [bold]/reload[/bold] later)"
+                    "Usage: [bold]/hf <query>[/bold]  — search HuggingFace for GGUF models\n"
+                    "  Example: /hf mistral 7b"
                 )
+            else:
+                asyncio.create_task(self._hf_search(query))
+
+        elif cmd == "setup":
+            await self._start_setup_wizard()
+
+        elif cmd == "model":
+            await self._handle_model_cmd(args)
 
         elif cmd == "reload":
             if self._model_override:
@@ -272,6 +360,61 @@ class LMAgentTUI(App[None]):
                 f"[red]Unknown command:[/red] /{escape(cmd)}  — /help for help"
             )
 
+    async def _handle_model_cmd(self, args: list[str]) -> None:
+        """/model [id] — checks catalog, prompts download if not present."""
+        if not args:
+            current = self._model_override or "(default from config)"
+            self._write_system(f"Current model override: [cyan]{current}[/cyan]")
+            return
+
+        model_id = args[0]
+
+        # Always check the local catalog first, regardless of current routing.
+        # If the model is a known local model, handle download / hot-reload.
+        try:
+            from core.runtime.model_manager import _load_catalog, list_downloaded_models
+            catalog   = {m["id"]: m for m in _load_catalog()}
+            downloaded = {m["id"] for m in list_downloaded_models()}
+
+            if model_id in catalog and model_id not in downloaded:
+                m = catalog[model_id]
+                self._pending_download_id = model_id
+                self._download_confirm_pending = True
+                self._write_system(
+                    f"Model [cyan]{escape(model_id)}[/cyan] is not downloaded.\n"
+                    f"  Size: ~{m.get('size_gb', '?')} GB  —  {escape(m.get('description', ''))}\n"
+                    "[yellow]Download and load now? [y/n][/yellow]"
+                )
+                return
+
+            if model_id in downloaded:
+                self._model_override = model_id
+                self._update_subtitle()
+                if self._config.routing.default in ("local", "auto"):
+                    self._reload_confirm_pending = True
+                    self._write_system(
+                        f"Model override: [cyan]{escape(model_id)}[/cyan]\n"
+                        "[yellow]Hot-reload daemon now? [y/n][/yellow]  "
+                        "(or use [bold]/reload[/bold])"
+                    )
+                else:
+                    self._write_system(
+                        f"Model override set: [cyan]{escape(model_id)}[/cyan]\n"
+                        "[dim]Switch routing to 'local' in config to use it.[/dim]"
+                    )
+                return
+        except Exception:
+            pass
+
+        # Fallback — non-catalog id (cloud model name, custom path, etc.)
+        self._model_override = model_id
+        self._update_subtitle()
+        self._reload_confirm_pending = True
+        self._write_system(
+            f"Model override set: [cyan]{escape(model_id)}[/cyan]\n"
+            "[yellow]Reload now? [y/n][/yellow]  (or use [bold]/reload[/bold] later)"
+        )
+
     # ── Background notification polling ───────────────────────────────────────
 
     async def _poll_notifications(self) -> None:
@@ -284,13 +427,301 @@ class LMAgentTUI(App[None]):
                 data = json.loads(str(raw))
                 for n in data.get("result", {}).get("notifications", []):
                     level = n.get("level", "info")
-                    msg = n.get("message", "")
+                    msg   = n.get("message", "")
                     color = "yellow" if level == "warning" else "dim"
                     self._write_system(f"[{color}]{escape(msg)}[/{color}]")
         except Exception:
             pass  # daemon not running or busy — silent
 
-    # ── Kill switch ────────────────────────────────────────────────────────────
+    # ── HuggingFace search ────────────────────────────────────────────────────
+
+    async def _hf_search(self, query: str) -> None:
+        self._write_system(f"Searching HuggingFace: [cyan]{escape(query)}[/cyan]…")
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    "https://huggingface.co/api/models",
+                    params={
+                        "search":    query,
+                        "filter":    "gguf",
+                        "sort":      "downloads",
+                        "direction": "-1",
+                        "limit":     "12",
+                    },
+                )
+                resp.raise_for_status()
+                results: list[dict] = resp.json()
+        except Exception as exc:
+            self._write_error(f"HuggingFace search failed: {escape(str(exc))}")
+            return
+
+        if not results:
+            self._write_system("No GGUF models found for that query.")
+            return
+
+        try:
+            from core.runtime.model_manager import _load_catalog, list_downloaded_models
+            catalog_ids    = {m["id"] for m in _load_catalog()}
+            downloaded_ids = {m["id"] for m in list_downloaded_models()}
+        except Exception:
+            catalog_ids, downloaded_ids = set(), set()
+
+        catalog_hits = [r for r in results if r.get("id") in catalog_ids]
+        other_hits   = [r for r in results if r.get("id") not in catalog_ids]
+
+        lines: list[str] = [
+            f"[bold]HuggingFace — GGUF results for '{escape(query)}'[/bold]", ""
+        ]
+
+        if catalog_hits:
+            lines.append("[dim]In local catalog (use /model <id> to load):[/dim]")
+            for m in catalog_hits:
+                mid  = m.get("id", "?")
+                dl   = m.get("downloads", 0)
+                tag  = "[green]✓ downloaded[/green]" if mid in downloaded_ids else "[dim]· not downloaded[/dim]"
+                lines.append(
+                    f"  [cyan]{escape(mid)}[/cyan]  {tag}  [dim]{dl:,} downloads[/dim]"
+                )
+            lines.append("")
+
+        if other_hits:
+            lines.append("[dim]Other results (not in catalog):[/dim]")
+            for m in other_hits[:8]:
+                mid = m.get("id", "?")
+                dl  = m.get("downloads", 0)
+                lines.append(
+                    f"  [dim]·[/dim] [cyan]{escape(mid)}[/cyan]  [dim]{dl:,} downloads[/dim]"
+                )
+
+        lines.append("")
+        lines.append(
+            "  Catalog: [bold]/model <id>[/bold]  ·  Full list: [bold]/models[/bold]"
+        )
+        self._write_system("\n".join(lines))
+
+    # ── Setup wizard ──────────────────────────────────────────────────────────
+
+    async def _start_setup_wizard(self) -> None:
+        if self._streaming:
+            self._write_system(
+                "[yellow]Cannot run /setup while a response is in progress.[/yellow]"
+            )
+            return
+
+        self._write_system(
+            "[bold cyan]Setup wizard[/bold cyan]  —  "
+            "press Enter to accept defaults, Ctrl+C to quit\n"
+        )
+
+        try:
+            from core.runtime.backend_detector import detect_best_backend, BACKEND_DESCRIPTIONS
+            best, statuses = await asyncio.get_event_loop().run_in_executor(
+                None, detect_best_backend
+            )
+        except Exception as exc:
+            self._write_error(f"Hardware detection failed: {escape(str(exc))}")
+            return
+
+        lines = ["[bold]Detected backends:[/bold]"]
+        available: list[str] = []
+        for name, st in statuses.items():
+            if st.get("available"):
+                desc = BACKEND_DESCRIPTIONS.get(name, {})
+                vram = st.get("vram_gb", 0)
+                ram  = st.get("ram_gb", 0)
+                hw   = f"{vram} GB VRAM" if vram else f"{ram} GB RAM"
+                rec  = " [yellow]← recommended[/yellow]" if name == best else ""
+                lines.append(
+                    f"  [cyan]{name}[/cyan]  "
+                    f"[dim]{escape(desc.get('tag', ''))}[/dim]  {hw}{rec}"
+                )
+                available.append(name)
+        self._write_system("\n".join(lines))
+
+        self._wizard_backends = available
+        self._wizard_data = {"_best": best}
+        self._wizard_step = 0
+        self._wizard_active = True
+
+        self._write_system(
+            f"\n[bold]Step 1/3 — Backend[/bold]\n"
+            f"  Available: {', '.join(available)}\n"
+            f"  [yellow]Enter backend[/yellow]  [dim](Enter = {best})[/dim]:"
+        )
+
+    async def _handle_wizard_input(self, text: str) -> None:
+        step = self._wizard_step
+
+        if step == 0:  # backend
+            best   = self._wizard_data.get("_best", "cpu")
+            choice = text.strip().lower() or best
+            if choice not in self._wizard_backends:
+                self._write_system(
+                    f"[red]Unknown backend '{escape(choice)}'.[/red]  "
+                    f"Choose from: {', '.join(self._wizard_backends)}"
+                )
+                return
+            self._wizard_data["backend"] = choice
+            self._wizard_step = 1
+            self._write_system(
+                f"  Backend: [cyan]{choice}[/cyan]\n\n"
+                "[bold]Step 2/3 — Language[/bold]\n"
+                "  Preferred language for responses\n"
+                "  [yellow]Enter language[/yellow]  [dim](Enter = English)[/dim]:"
+            )
+
+        elif step == 1:  # language
+            lang = text.strip() or "English"
+            self._wizard_data["language"] = lang
+            self._wizard_step = 2
+            self._write_system(
+                f"  Language: [cyan]{escape(lang)}[/cyan]\n\n"
+                "[bold]Step 3/3 — Interests[/bold]\n"
+                "  Comma-separated topics  (e.g. coding, writing, science)\n"
+                "  [yellow]Enter interests[/yellow]  [dim](Enter = general)[/dim]:"
+            )
+
+        elif step == 2:  # interests
+            interests = text.strip() or "general"
+            self._wizard_data["interests"] = interests
+            self._wizard_step = 3
+            backend  = self._wizard_data["backend"]
+            language = self._wizard_data["language"]
+            self._write_system(
+                f"  Interests: [cyan]{escape(interests)}[/cyan]\n\n"
+                "[bold]Confirm setup:[/bold]\n"
+                f"  Backend:   [cyan]{backend}[/cyan]\n"
+                f"  Language:  [cyan]{escape(language)}[/cyan]\n"
+                f"  Interests: [cyan]{escape(interests)}[/cyan]\n"
+                "[yellow]Apply? [y/n][/yellow]:"
+            )
+
+        elif step == 3:  # confirm
+            if text.lower() in ("y", "yes"):
+                await self._apply_wizard()
+            else:
+                self._write_system("[dim]Setup cancelled — no changes made.[/dim]")
+            self._wizard_active = False
+            self._wizard_step   = 0
+
+    async def _apply_wizard(self) -> None:
+        """Write config.yaml + global/preferences.md from wizard answers."""
+        import yaml
+
+        backend   = self._wizard_data["backend"]
+        language  = self._wizard_data["language"]
+        interests = self._wizard_data["interests"]
+
+        # Update backends.local.backend in config.yaml
+        from core.config import CONFIG_PATH
+        try:
+            with CONFIG_PATH.open() as f:
+                raw = yaml.safe_load(f) or {}
+            raw.setdefault("backends", {}).setdefault("local", {})["backend"] = backend
+            with CONFIG_PATH.open("w") as f:
+                yaml.dump(raw, f, default_flow_style=False, allow_unicode=True)
+        except Exception as exc:
+            self._write_error(f"Failed to update config.yaml: {escape(str(exc))}")
+            return
+
+        # Write global/preferences.md
+        prefs_path = _USER_DIR / "memory" / "global" / "preferences.md"
+        prefs_path.parent.mkdir(parents=True, exist_ok=True)
+        prefs_path.write_text(
+            "# User preferences\n\n"
+            "## Communication\n\n"
+            f"- Preferred language: {language}\n\n"
+            "## Technical\n\n"
+            f"- Backend: {backend}\n\n"
+            "## Workflow\n\n"
+            f"- Interests: {interests}\n",
+            encoding="utf-8",
+        )
+
+        self._write_system(
+            "[green]Setup complete.[/green]\n"
+            f"  config.yaml — backend set to [cyan]{backend}[/cyan]\n"
+            f"  preferences.md — language=[cyan]{escape(language)}[/cyan], "
+            f"interests=[cyan]{escape(interests)}[/cyan]\n"
+            "  [dim]Restart the daemon to use the new backend.[/dim]"
+        )
+
+    # ── Model download + hot-reload ───────────────────────────────────────────
+
+    async def _download_and_reload(self, model_id: str) -> None:
+        """Download a catalog model via httpx then hot-swap the daemon."""
+        from core.runtime.model_manager import _load_catalog, MODELS_DIR
+
+        catalog = {m["id"]: m for m in _load_catalog()}
+        m = catalog.get(model_id)
+        if m is None:
+            self._write_error(f"Model {model_id!r} not found in catalog.")
+            return
+
+        size_gb = m.get("size_gb", "?")
+        self._write_system(
+            f"Downloading [cyan]{escape(model_id)}[/cyan] "
+            f"({size_gb} GB from HuggingFace)…\n"
+            "  [dim]CLI stays responsive — responses are not blocked.[/dim]"
+        )
+
+        _last_pct: list[int] = [-1]
+
+        def _on_progress(received: int, total: int) -> None:
+            if total <= 0:
+                return
+            pct = int(received * 100 / total)
+            step = pct // 10 * 10  # report every 10 %
+            if step != _last_pct[0]:
+                _last_pct[0] = step
+                mb_done  = received / 1024 / 1024
+                mb_total = total / 1024 / 1024
+                # Running in the main event loop — direct call is correct
+                self._write_system(
+                    f"  [dim]{step}%  {mb_done:.0f} / {mb_total:.0f} MB[/dim]"
+                )
+
+        try:
+            await _download_model_httpx(
+                m["hf_repo"],
+                m["hf_file"],
+                MODELS_DIR / model_id,
+                on_progress=_on_progress,
+            )
+        except Exception as exc:
+            self._write_error(f"Download failed: {escape(str(exc))}")
+            return
+
+        self._write_system(
+            f"[green]Download complete.[/green] "
+            f"Loading [cyan]{escape(model_id)}[/cyan] into daemon…"
+        )
+        self._model_override = model_id
+        self._update_subtitle()
+
+        try:
+            await self._send_model_reload(model_id)
+            self._write_system(
+                f"[green]Model {escape(model_id)} is now active.[/green]"
+            )
+        except Exception as exc:
+            self._write_error(f"Daemon reload failed: {escape(str(exc))}")
+
+    async def _send_model_reload(self, model_id: str) -> None:
+        """Send model.reload IPC to the daemon and wait for confirmation."""
+        uri = f"ws://127.0.0.1:{self._config.daemon.port}"
+        async with websockets.connect(uri, open_timeout=10) as ws:
+            await ws.send(json.dumps({
+                "jsonrpc": "2.0",
+                "method": "model.reload",
+                "params": {"model_id": model_id},
+                "id": str(uuid.uuid4()),
+            }))
+            # llama-server startup can take up to 60 s
+            raw = await asyncio.wait_for(ws.recv(), timeout=120)
+            data = json.loads(str(raw))
+            if data.get("error"):
+                raise RuntimeError(data["error"].get("message", "model.reload failed"))
 
     # ── Theme persistence ──────────────────────────────────────────────────────
 
@@ -310,7 +741,7 @@ class LMAgentTUI(App[None]):
             pass
 
     def watch_theme(self, theme: str) -> None:
-        """Persist any theme change (command palette, API…) to cli_state.json."""
+        """Persist any theme change to cli_state.json."""
         state = self._load_ui_state()
         state["theme"] = theme
         self._save_ui_state(state)
@@ -330,23 +761,26 @@ class LMAgentTUI(App[None]):
         completions.display = False
 
     def _do_reload(self) -> None:
-        """Confirm model override is active — takes effect on the next message."""
+        """Apply model override — hot-reload daemon if routing=local."""
         self._reload_confirm_pending = False
         self._update_subtitle()
+        if self._config.routing.default in ("local", "auto") and self._model_override:
+            asyncio.create_task(self._reload_silent(self._model_override))
         self._write_system(
-            f"[green]Model reloaded:[/green] [cyan]{escape(self._model_override or '')}[/cyan]"
+            f"[green]Model:[/green] [cyan]{escape(self._model_override or '')}[/cyan]"
             " — active on next message."
         )
 
-    # ── Kill switch ────────────────────────────────────────────────────────────
+    async def _reload_silent(self, model_id: str) -> None:
+        try:
+            await self._send_model_reload(model_id)
+        except Exception as exc:
+            self._write_error(f"Daemon reload: {escape(str(exc))}")
+
+    # ── Cancel ─────────────────────────────────────────────────────────────────
 
     async def action_cancel_response(self) -> None:
-        """Cancel the in-progress AI response (ESC or /stop).
-
-        Cancels the asyncio task, which raises CancelledError inside _run_chat
-        at the next WebSocket await. The websockets context manager then sends
-        a close frame — the daemon receives ConnectionClosedOK and stops cleanly.
-        """
+        """Cancel in-progress AI response (ESC or /stop)."""
         if self._ws_task and not self._ws_task.done():
             self._ws_task.cancel()
             self._write_system("[yellow]Cancelled.[/yellow]")
@@ -364,9 +798,9 @@ class LMAgentTUI(App[None]):
     async def _run_chat(self, message: str) -> None:
         """Stream a chat request from the daemon.
 
-        Cancellation: asyncio.CancelledError is raised at the next WebSocket
-        await. The `async with websockets.connect()` context manager closes
-        the connection cleanly on exit (including on exception).
+        Cancellation: CancelledError is raised at the next WebSocket await.
+        The `async with websockets.connect()` context manager closes the
+        connection cleanly on exit.
         """
         uri = f"ws://127.0.0.1:{self._config.daemon.port}"
         try:
@@ -376,19 +810,20 @@ class LMAgentTUI(App[None]):
                     params["model_id"] = self._model_override
                 payload = json.dumps({
                     "jsonrpc": "2.0",
-                    "method": "chat",
-                    "params": params,
-                    "id": str(uuid.uuid4()),
+                    "method":  "chat",
+                    "params":  params,
+                    "id":      str(uuid.uuid4()),
                 })
                 await ws.send(payload)
 
                 pending_text: list[str] = []
+                _last_sub_agent: str | None = None  # most recent call_agent target
 
                 async for raw in ws:
                     data: dict[str, Any] = json.loads(str(raw))
 
                     if data.get("method") == "chat.event":
-                        evt = data["params"]
+                        evt   = data["params"]
                         etype = evt.get("type")
 
                         if etype == "status":
@@ -408,14 +843,38 @@ class LMAgentTUI(App[None]):
                             if pending_text:
                                 self._write_assistant("".join(pending_text))
                                 pending_text = []
-                            self._write_tool_call(
-                                evt.get("name", "?"), evt.get("input", {})
-                            )
+                            tool_name  = evt.get("name", "?")
+                            tool_input = evt.get("input", {})
+                            self._write_tool_call(tool_name, tool_input)
+                            # Multi-agent: open tab for delegated agent
+                            if tool_name == "call_agent":
+                                sub = tool_input.get("name", "")
+                                if sub:
+                                    _last_sub_agent = sub
+                                    self._ensure_agent_tab(sub)
+                                    self._switch_to_agent_tab(sub)
 
                         elif etype == "tool_result":
-                            self._write_tool_result(
-                                evt.get("name", "?"), evt.get("output", {})
-                            )
+                            tool_name = evt.get("name", "?")
+                            output    = evt.get("output", {})
+                            self._write_tool_result(tool_name, output)
+                            # Multi-agent: write sub-agent output to its tab
+                            if tool_name == "call_agent" and isinstance(output, dict):
+                                sub        = output.get("agent") or _last_sub_agent or ""
+                                agent_out  = output.get("output", "")
+                                errors     = output.get("errors", [])
+                                if sub:
+                                    log = self._chat(sub)
+                                    if agent_out:
+                                        log.write(
+                                            f"[bold green]@{sub}[/bold green]: "
+                                            f"{escape(agent_out)}"
+                                        )
+                                    for err in errors:
+                                        log.write(f"[bold red]✗[/bold red] {escape(err)}")
+                                # Return focus to main agent tab
+                                self._switch_to_agent_tab(self._persona)
+                                _last_sub_agent = None
 
                         elif etype == "error":
                             self._write_error(evt.get("message", "unknown error"))
@@ -430,11 +889,10 @@ class LMAgentTUI(App[None]):
                         break
 
                     elif "result" in data:
-                        # Final RPCResponse — nothing to display
                         break
 
         except asyncio.CancelledError:
-            raise  # let asyncio handle it; finally block still runs
+            raise
         except (ConnectionRefusedError, OSError):
             self._write_error(
                 f"Cannot connect to daemon (port {self._config.daemon.port}).\n"
@@ -446,10 +904,37 @@ class LMAgentTUI(App[None]):
             self._streaming = False
             self._update_subtitle()
 
+    # ── Multi-agent tab helpers ────────────────────────────────────────────────
+
+    def _ensure_agent_tab(self, agent_name: str) -> None:
+        """Create a tab for agent_name if it does not already exist."""
+        tab_id = f"tab-{agent_name}"
+        if self.query(f"#{tab_id}"):
+            return
+        tc = self.query_one("#agent-tabs", TabbedContent)
+        tc.add_pane(TabPane(
+            f"@{agent_name}",
+            RichLog(markup=True, highlight=False, wrap=True, id=f"chat-{agent_name}"),
+            id=tab_id,
+        ))
+
+    def _switch_to_agent_tab(self, agent_name: str) -> None:
+        """Activate the tab for agent_name (creates it first if needed)."""
+        self._ensure_agent_tab(agent_name)
+        self.query_one("#agent-tabs", TabbedContent).active = f"tab-{agent_name}"
+
     # ── Rendering helpers ──────────────────────────────────────────────────────
 
-    def _chat(self) -> RichLog:
-        return self.query_one("#chat", RichLog)
+    def _chat(self, agent: str | None = None) -> RichLog:
+        """Return the RichLog for the given agent (defaults to current persona)."""
+        target = agent or self._persona
+        try:
+            return self.query_one(f"#chat-{target}", RichLog)
+        except Exception:
+            try:
+                return self.query_one(f"#chat-{self._persona}", RichLog)
+            except Exception:
+                return self.query_one(RichLog)
 
     def _write_user(self, text: str) -> None:
         self._chat().write(f"\n[bold blue]You[/bold blue]: {escape(text)}")
@@ -462,7 +947,6 @@ class LMAgentTUI(App[None]):
             body = json.dumps(input_, ensure_ascii=False, indent=2)
         except Exception:
             body = str(input_)
-        # indent continuation lines
         indented = body.replace("\n", "\n    ")
         self._chat().write(
             f"  [dim]▶ tool [bold]{escape(name)}[/bold][/dim]\n"
@@ -470,7 +954,7 @@ class LMAgentTUI(App[None]):
         )
 
     def _write_tool_result(self, name: str, output: dict) -> None:
-        body = format_tool_result(name, output)
+        body  = format_tool_result(name, output)
         color = "red" if "error" in body and not body.startswith("stdout") else "dim"
         self._chat().write(
             f"  [{color}]◀ result [bold]{escape(name)}[/bold]: {escape(body)}[/{color}]"
@@ -489,7 +973,7 @@ class LMAgentTUI(App[None]):
     # ── Info commands ──────────────────────────────────────────────────────────
 
     def _show_models(self) -> None:
-        cloud = self._config.backends.cloud
+        cloud       = self._config.backends.cloud
         local_default = self._config.backends.local.default_model
         lines: list[str] = ["[bold]Available models:[/bold]", ""]
 
@@ -502,16 +986,13 @@ class LMAgentTUI(App[None]):
         try:
             from core.runtime.model_manager import _load_catalog, list_downloaded_models
             downloaded = {m["id"] for m in list_downloaded_models()}
-            active = local_default or ""
+            active     = local_default or ""
             for m in _load_catalog():
-                mid = m["id"]
-                if mid in downloaded:
-                    status = "[green]✓[/green]"
-                else:
-                    status = "[dim]·[/dim]"
+                mid      = m["id"]
+                status   = "[green]✓[/green]" if mid in downloaded else "[dim]·[/dim]"
                 is_active = " [yellow]← active[/yellow]" if mid == active else ""
-                tags = ", ".join(m.get("tags", []))
-                size = f"{m.get('size_gb', '?')} GB"
+                tags     = ", ".join(m.get("tags", []))
+                size     = f"{m.get('size_gb', '?')} GB"
                 lines.append(
                     f"  {status} [cyan]{mid}[/cyan]{is_active}\n"
                     f"       {escape(m.get('description', ''))}"
@@ -521,7 +1002,10 @@ class LMAgentTUI(App[None]):
             lines.append(f"  [red]Could not load catalog: {escape(str(exc))}[/red]")
 
         lines.append("")
-        lines.append("  Use [bold]/model <id>[/bold] to override for this session.")
+        lines.append(
+            "  [bold]/model <id>[/bold] to load  ·  "
+            "[bold]/hf <query>[/bold] to search HuggingFace"
+        )
         self._write_system("\n".join(lines))
 
     def _show_persona_info(self) -> None:
@@ -547,11 +1031,9 @@ class LMAgentTUI(App[None]):
             for t in [BASH_TOOL, READ_FILE_TOOL, WRITE_FILE_TOOL,
                       LIST_DIRECTORY_TOOL, GIT_CLONE_TOOL, GIT_STATUS_TOOL, GIT_LOG_TOOL]:
                 registry.register(t)
-            p = load_persona(self._persona)
+            p        = load_persona(self._persona)
             tools_str = get_tools_list_str(p, registry)
-            self._write_system(
-                f"[bold]Tools (@{self._persona}):[/bold]\n{tools_str}"
-            )
+            self._write_system(f"[bold]Tools (@{self._persona}):[/bold]\n{tools_str}")
         except Exception as exc:
             self._write_error(escape(str(exc)))
 

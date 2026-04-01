@@ -31,18 +31,22 @@ LLAMA_RELEASES_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases/l
 # Asset name glob patterns — subject to upstream changes.
 # Key: (os_name, backend)  — os_name matches platform.system().lower()
 BINARY_PATTERNS: dict[tuple[str, str], str] = {
-    # ── Linux ──
-    ("linux", "cuda"): "llama-*-bin-ubuntu-*-x64.*",
-    ("linux", "rocm"): "llama-*-bin-ubuntu-*-x64-rocm.*",
-    ("linux", "vulkan"): "llama-*-bin-ubuntu-x64-vulkan.*",
-    ("linux", "cpu"): "llama-*-bin-ubuntu-*-x64.*",
+    # ── Linux — patterns valid as of llama.cpp b8611 ──
+    # cpu/cuda: llama-*-bin-ubuntu-x64.tar.gz
+    ("linux", "cuda"):   "llama-*-bin-ubuntu-x64.*",
+    # rocm:    llama-*-bin-ubuntu-rocm-7.2-x64.tar.gz
+    ("linux", "rocm"):   "llama-*-bin-ubuntu-rocm-*-x64.*",
+    # vulkan:  llama-*-bin-ubuntu-vulkan-x64.tar.gz
+    ("linux", "vulkan"): "llama-*-bin-ubuntu-vulkan-x64.*",
+    ("linux", "cpu"):    "llama-*-bin-ubuntu-x64.*",
     # ── Windows ──
-    ("windows", "cuda"): "llama-*-bin-win-cuda-cu*-x64.*",
+    ("windows", "cuda"):   "llama-*-bin-win-cuda-*-x64.*",
     ("windows", "vulkan"): "llama-*-bin-win-vulkan-x64.*",
-    ("windows", "cpu"): "llama-*-bin-win-noavx-x64.*",
+    # win-cpu-x64 replaced win-noavx-x64
+    ("windows", "cpu"):    "llama-*-bin-win-cpu-x64.*",
     # ── macOS ──
     ("darwin", "metal"): "llama-*-bin-macos-arm64.*",
-    ("darwin", "cpu"): "llama-*-bin-macos-x64.*",
+    ("darwin", "cpu"):   "llama-*-bin-macos-x64.*",
 }
 
 BIN_DIR = Path.home() / ".lmagent-plus" / "bin"
@@ -141,13 +145,23 @@ async def download_llama_server(
     except Exception as e:
         raise BackendError(f"Error downloading asset '{asset['name']}': {e}") from e
 
-    # Extract llama-server (and llama-cli if present)
-    _EXTRACT_TARGETS = {"llama-server", "llama-server.exe", "llama-cli", "llama-cli.exe"}
+    # Extract binaries and shared libraries required at runtime.
+    # Binaries: llama-server, llama-cli (and .exe variants for Windows)
+    # Shared libs: all .so* / .dylib files — llama-server links them at load time
+    _BIN_TARGETS  = {"llama-server", "llama-server.exe", "llama-cli", "llama-cli.exe"}
+
+    def _should_extract(filename: str) -> bool:
+        if filename in _BIN_TARGETS:
+            return True
+        # Match libXXX.so, libXXX.so.N, libXXX.so.N.N.N, libXXX.dylib
+        stem = Path(filename).stem
+        return filename.endswith(".dylib") or ".so" in filename
+
     if zip_path.suffix == ".zip":
         with zipfile.ZipFile(zip_path) as zf:
             for member in zf.namelist():
                 filename = Path(member).name
-                if filename in _EXTRACT_TARGETS:
+                if _should_extract(filename):
                     dest = BIN_DIR / filename
                     dest.write_bytes(zf.read(member))
                     dest.chmod(0o755)
@@ -155,7 +169,7 @@ async def download_llama_server(
         with tarfile.open(zip_path) as tf:
             for member in tf.getmembers():
                 filename = Path(member.name).name
-                if filename in _EXTRACT_TARGETS:
+                if _should_extract(filename):
                     fobj = tf.extractfile(member)
                     if fobj is not None:
                         dest = BIN_DIR / filename
@@ -201,6 +215,7 @@ def start_server(
     gpu_layers: int = -1,
     threads: int = -1,
     startup_timeout: float = 60.0,
+    vulkan_device: int = -1,
 ) -> subprocess.Popen:
     """
     Launch llama-server as a subprocess and wait for it to be ready.
@@ -244,12 +259,25 @@ def start_server(
         str(threads),
     ]
 
+    # Ensure llama-server can find the .so files extracted alongside it.
+    env = os.environ.copy()
+    existing = env.get("LD_LIBRARY_PATH", "")
+    bin_dir_str = str(BIN_DIR)
+    if bin_dir_str not in existing.split(":"):
+        env["LD_LIBRARY_PATH"] = f"{bin_dir_str}:{existing}" if existing else bin_dir_str
+
+    # Select the correct Vulkan device when multiple GPUs are present.
+    # Without this, llama.cpp defaults to device 0 which may be the integrated GPU.
+    if backend == "vulkan" and vulkan_device >= 0:
+        env["GGML_VULKAN_DEVICE"] = str(vulkan_device)
+
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         start_new_session=True,  # own process group → clean SIGKILL of all children
+        env=env,
     )
 
     if not _wait_for_health("127.0.0.1", port, timeout=startup_timeout):
@@ -447,6 +475,7 @@ class LocalBackendManager:
             ctx_size=local_cfg.ctx_size,
             gpu_layers=local_cfg.gpu_layers,
             threads=local_cfg.threads,
+            vulkan_device=local_cfg.vulkan_device,
         )
         self._loaded_model = model_path
         log.info("JIT: llama-server ready on port %d.", local_cfg.port)

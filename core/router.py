@@ -17,11 +17,17 @@ from core.errors import BackendError
 
 if TYPE_CHECKING:
     from core.config import Config
+    from core.runtime.llama_manager import LocalBackendManager
 
 
 class Router:
-    def __init__(self, config: "Config") -> None:
+    def __init__(
+        self,
+        config: "Config",
+        local_manager: "LocalBackendManager | None" = None,
+    ) -> None:
         self._config = config
+        self._local_manager = local_manager
 
     async def chat_completion(
         self,
@@ -51,11 +57,13 @@ class Router:
         backend = self._config.routing.default
 
         if backend == "local":
+            await self._jit_load()
             return await self._local_completion(messages, tools)
         if backend == "cloud":
             return await self._cloud_completion(messages, tools, model_override=model)
         if backend == "auto":
             try:
+                await self._jit_load()
                 return await self._local_completion(messages, tools)
             except (BackendError, OSError):
                 if not self._config.routing.auto_fallback:
@@ -63,6 +71,11 @@ class Router:
                 return await self._cloud_completion(messages, tools, model_override=model)
 
         raise BackendError(f"Unknown backend: {backend!r}")
+
+    async def _jit_load(self) -> None:
+        """Trigger JIT model load if a LocalBackendManager is wired in."""
+        if self._local_manager is not None:
+            await self._local_manager.ensure_loaded_from_config()
 
     async def _local_completion(
         self,

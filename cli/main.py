@@ -1,0 +1,388 @@
+"""
+LMAgent-Plus CLI — Textual TUI.
+
+Connects to the daemon via WebSocket and streams events in real time.
+The daemon must be started separately:  python -m core
+
+Slash commands
+--------------
+/help              This help message
+/agent [name]      Switch active agent
+/persona           Show active persona info
+/tools             List enabled tools for the active agent
+/model [name]      Override cloud model (requires daemon restart to take effect)
+/clear             Clear chat history
+/stop              Cancel the current response  (same as ESC)
+/status            Daemon connection info
+
+Keyboard
+--------
+ESC        Cancel current response
+Ctrl+C     Quit
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import uuid
+from typing import Any
+
+import websockets
+from rich.markup import escape
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.widgets import Footer, Header, Input, RichLog
+
+from core.config import Config
+
+VALID_AGENTS = {"assistant", "coder", "writer", "research"}
+
+HELP_TEXT = """\
+[bold cyan]LMAgent-Plus[/bold cyan] — slash commands
+
+  [bold]/help[/bold]              This help message
+  [bold]/agent[/bold] \\[name]     Switch active agent (assistant | coder | writer | research)
+  [bold]/persona[/bold]           Show active persona info
+  [bold]/tools[/bold]             List enabled tools for the active agent
+  [bold]/model[/bold] \\[name]     Override cloud model (requires daemon restart)
+  [bold]/clear[/bold]             Clear chat history
+  [bold]/stop[/bold]              Cancel current response  (same as [bold]ESC[/bold])
+  [bold]/status[/bold]            Daemon connection info
+
+[dim]Keyboard:[/dim]  ESC = cancel   Ctrl+C = quit\
+"""
+
+CSS = """
+RichLog {
+    height: 1fr;
+    border: solid $primary-darken-2;
+    margin: 0 1;
+    padding: 0 1;
+    scrollbar-gutter: stable;
+}
+
+Input {
+    margin: 0 1 1 1;
+}
+"""
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers (testable without Textual)
+# ---------------------------------------------------------------------------
+
+def parse_slash_command(text: str) -> tuple[str, list[str]]:
+    """Parse '/cmd arg1 arg2' → ('cmd', ['arg1', 'arg2']).
+
+    Returns ('', []) if text does not start with '/'.
+    """
+    parts = text.strip().split()
+    if not parts or not parts[0].startswith("/"):
+        return ("", [])
+    return (parts[0][1:].lower(), parts[1:])
+
+
+def format_tool_result(name: str, output: dict) -> str:
+    """Format a tool result for display (compact, max ~400 chars)."""
+    if "stdout" in output and output["stdout"]:
+        preview = output["stdout"][:400]
+        if len(output["stdout"]) > 400:
+            preview += "…"
+        return f"stdout: {preview}"
+    if "stderr" in output and output["stderr"] and not output.get("stdout"):
+        preview = output["stderr"][:400]
+        return f"stderr: {preview}"
+    if "error" in output:
+        return f"error: {output['error']}"
+    try:
+        raw = json.dumps(output, ensure_ascii=False)
+        return raw[:400] + ("…" if len(raw) > 400 else "")
+    except Exception:
+        return str(output)[:400]
+
+
+# ---------------------------------------------------------------------------
+# Textual app
+# ---------------------------------------------------------------------------
+
+class LMAgentTUI(App[None]):
+    """LMAgent-Plus terminal interface."""
+
+    TITLE = "LMAgent-Plus"
+    CSS = CSS
+    BINDINGS = [
+        Binding("escape", "cancel_response", "Cancel", show=True),
+        Binding("ctrl+c", "quit", "Quit", show=True),
+    ]
+
+    def __init__(self, config: Config) -> None:
+        self._config = config
+        self._persona = "assistant"
+        self._model_override: str | None = None
+        self._ws_task: asyncio.Task[None] | None = None
+        self._streaming = False
+        super().__init__()
+
+    # ── Composition ────────────────────────────────────────────────────────────
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield RichLog(markup=True, highlight=False, wrap=True, id="chat")
+        yield Input(placeholder="Type a message or /help…", id="input")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self._update_subtitle()
+        self._write_system(
+            f"Daemon: [cyan]ws://127.0.0.1:{self._config.daemon.port}[/cyan]  "
+            f"Agent: [green]@{self._persona}[/green]  "
+            "Type [bold]/help[/bold] for commands"
+        )
+
+    # ── Input handling ─────────────────────────────────────────────────────────
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        text = event.value.strip()
+        event.input.clear()
+        if not text:
+            return
+        if text.startswith("/"):
+            await self._handle_slash(text)
+        elif self._streaming:
+            self._write_system("[yellow]Response in progress — ESC to cancel.[/yellow]")
+        else:
+            await self._start_chat(text)
+
+    async def _handle_slash(self, raw: str) -> None:
+        cmd, args = parse_slash_command(raw)
+
+        if cmd == "help":
+            self._write_system(HELP_TEXT)
+
+        elif cmd == "stop":
+            await self.action_cancel_response()
+
+        elif cmd == "clear":
+            self.query_one("#chat", RichLog).clear()
+
+        elif cmd == "agent":
+            if not args:
+                self._write_system(
+                    f"Active agent: [green]@{self._persona}[/green]\n"
+                    f"  Valid: {', '.join(sorted(VALID_AGENTS))}"
+                )
+            else:
+                name = args[0].lower()
+                if name not in VALID_AGENTS:
+                    self._write_system(
+                        f"[red]Unknown agent '{escape(name)}'.[/red]  "
+                        f"Valid: {', '.join(sorted(VALID_AGENTS))}"
+                    )
+                else:
+                    self._persona = name
+                    self._update_subtitle()
+                    self._write_system(f"Switched to [green]@{self._persona}[/green]")
+
+        elif cmd == "persona":
+            self._show_persona_info()
+
+        elif cmd == "tools":
+            self._show_tools()
+
+        elif cmd == "model":
+            if not args:
+                current = self._model_override or "(default from config)"
+                self._write_system(f"Current model override: [cyan]{current}[/cyan]")
+            else:
+                self._model_override = args[0]
+                self._write_system(
+                    f"Model override set: [cyan]{escape(self._model_override)}[/cyan]\n"
+                    "[dim]Restart the daemon for this to take effect.[/dim]"
+                )
+
+        elif cmd == "status":
+            self._show_connection_status()
+
+        else:
+            self._write_system(
+                f"[red]Unknown command:[/red] /{escape(cmd)}  — /help for help"
+            )
+
+    # ── Kill switch ────────────────────────────────────────────────────────────
+
+    async def action_cancel_response(self) -> None:
+        """Cancel the in-progress AI response (ESC or /stop).
+
+        Cancels the asyncio task, which raises CancelledError inside _run_chat
+        at the next WebSocket await. The websockets context manager then sends
+        a close frame — the daemon receives ConnectionClosedOK and stops cleanly.
+        """
+        if self._ws_task and not self._ws_task.done():
+            self._ws_task.cancel()
+            self._write_system("[yellow]Cancelled.[/yellow]")
+        self._streaming = False
+        self._update_subtitle()
+
+    # ── Chat ───────────────────────────────────────────────────────────────────
+
+    async def _start_chat(self, message: str) -> None:
+        self._write_user(message)
+        self._streaming = True
+        self._update_subtitle("thinking…")
+        self._ws_task = asyncio.create_task(self._run_chat(message))
+
+    async def _run_chat(self, message: str) -> None:
+        """Stream a chat request from the daemon.
+
+        Cancellation: asyncio.CancelledError is raised at the next WebSocket
+        await. The `async with websockets.connect()` context manager closes
+        the connection cleanly on exit (including on exception).
+        """
+        uri = f"ws://127.0.0.1:{self._config.daemon.port}"
+        try:
+            async with websockets.connect(uri, open_timeout=5) as ws:
+                payload = json.dumps({
+                    "jsonrpc": "2.0",
+                    "method": "chat",
+                    "params": {
+                        "message": message,
+                        "agent_id": self._persona,
+                    },
+                    "id": str(uuid.uuid4()),
+                })
+                await ws.send(payload)
+
+                pending_text: list[str] = []
+
+                async for raw in ws:
+                    data: dict[str, Any] = json.loads(str(raw))
+
+                    if data.get("method") == "chat.event":
+                        evt = data["params"]
+                        etype = evt.get("type")
+
+                        if etype == "text":
+                            pending_text.append(evt.get("content", ""))
+
+                        elif etype == "tool_call":
+                            if pending_text:
+                                self._write_assistant("".join(pending_text))
+                                pending_text = []
+                            self._write_tool_call(
+                                evt.get("name", "?"), evt.get("input", {})
+                            )
+
+                        elif etype == "tool_result":
+                            self._write_tool_result(
+                                evt.get("name", "?"), evt.get("output", {})
+                            )
+
+                        elif etype == "error":
+                            self._write_error(evt.get("message", "unknown error"))
+
+                        elif etype == "done":
+                            if pending_text:
+                                self._write_assistant("".join(pending_text))
+                            break
+
+                    elif "error" in data and data["error"]:
+                        self._write_error(data["error"].get("message", "RPC error"))
+                        break
+
+                    elif "result" in data:
+                        # Final RPCResponse — nothing to display
+                        break
+
+        except asyncio.CancelledError:
+            raise  # let asyncio handle it; finally block still runs
+        except (ConnectionRefusedError, OSError):
+            self._write_error(
+                f"Cannot connect to daemon (port {self._config.daemon.port}).\n"
+                "  Start with:  [bold]python -m core[/bold]"
+            )
+        except Exception as exc:
+            self._write_error(f"{escape(str(exc))}")
+        finally:
+            self._streaming = False
+            self._update_subtitle()
+
+    # ── Rendering helpers ──────────────────────────────────────────────────────
+
+    def _chat(self) -> RichLog:
+        return self.query_one("#chat", RichLog)
+
+    def _write_user(self, text: str) -> None:
+        self._chat().write(f"\n[bold blue]You[/bold blue]: {escape(text)}")
+
+    def _write_assistant(self, text: str) -> None:
+        self._chat().write(f"[bold green]@{self._persona}[/bold green]: {escape(text)}")
+
+    def _write_tool_call(self, name: str, input_: dict) -> None:
+        try:
+            body = json.dumps(input_, ensure_ascii=False, indent=2)
+        except Exception:
+            body = str(input_)
+        # indent continuation lines
+        indented = body.replace("\n", "\n    ")
+        self._chat().write(
+            f"  [dim]▶ tool [bold]{escape(name)}[/bold][/dim]\n"
+            f"  [dim]  {escape(indented)}[/dim]"
+        )
+
+    def _write_tool_result(self, name: str, output: dict) -> None:
+        body = format_tool_result(name, output)
+        color = "red" if "error" in body and not body.startswith("stdout") else "dim"
+        self._chat().write(
+            f"  [{color}]◀ result [bold]{escape(name)}[/bold]: {escape(body)}[/{color}]"
+        )
+
+    def _write_error(self, msg: str) -> None:
+        self._chat().write(f"[bold red]✗[/bold red] {msg}")
+
+    def _write_system(self, msg: str) -> None:
+        self._chat().write(f"[dim]{msg}[/dim]")
+
+    def _update_subtitle(self, status: str = "idle") -> None:
+        self.sub_title = f"@{self._persona} — {status}"
+
+    # ── Info commands ──────────────────────────────────────────────────────────
+
+    def _show_persona_info(self) -> None:
+        try:
+            from core.persona_loader import load_persona
+            p = load_persona(self._persona)
+            self._write_system(
+                f"[bold]@{self._persona}[/bold]: {escape(p.get('description', '—'))}\n"
+                f"  model: {escape(str(p.get('default_model', '—')))}\n"
+                f"  memory: {escape(str(p.get('memory_context', '—')))}"
+            )
+        except Exception as exc:
+            self._write_error(escape(str(exc)))
+
+    def _show_tools(self) -> None:
+        try:
+            from core.persona_loader import load_persona, get_tools_list_str
+            from core.tool_registry import ToolRegistry
+            from core.tools.bash import BASH_TOOL
+            from core.tools.file_ops import READ_FILE_TOOL, WRITE_FILE_TOOL, LIST_DIRECTORY_TOOL
+            from core.tools.git import GIT_CLONE_TOOL, GIT_STATUS_TOOL, GIT_LOG_TOOL
+            registry = ToolRegistry()
+            for t in [BASH_TOOL, READ_FILE_TOOL, WRITE_FILE_TOOL,
+                      LIST_DIRECTORY_TOOL, GIT_CLONE_TOOL, GIT_STATUS_TOOL, GIT_LOG_TOOL]:
+                registry.register(t)
+            p = load_persona(self._persona)
+            tools_str = get_tools_list_str(p, registry)
+            self._write_system(
+                f"[bold]Tools (@{self._persona}):[/bold]\n{tools_str}"
+            )
+        except Exception as exc:
+            self._write_error(escape(str(exc)))
+
+    def _show_connection_status(self) -> None:
+        state = "[yellow]busy[/yellow]" if self._streaming else "[green]idle[/green]"
+        self._write_system(
+            f"Daemon:  ws://127.0.0.1:{self._config.daemon.port}\n"
+            f"  Agent:   @{self._persona}\n"
+            f"  State:   {state}"
+        )

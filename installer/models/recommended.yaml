@@ -1,4 +1,15 @@
 models:
+  - id: "qwen3-1.7b-q4"
+    display_name: "Qwen3 1.7B (Q4)"
+    description: "Tiny generalist — fast, low resource, good for testing"
+    hf_repo: "unsloth/Qwen3-1.7B-GGUF"
+    hf_file: "Qwen3-1.7B-Q4_K_M.gguf"
+    size_gb: 1.1
+    min_vram_gb: 2
+    min_ram_gb: 4
+    recommended_for: ["assistant"]
+    tags: ["general", "tiny"]
+
   - id: "qwen3-coder-30b-q4"
     display_name: "Qwen3 Coder 30B (Q4)"
     description: "Best for code — requires ~18 GB VRAM or RAM"

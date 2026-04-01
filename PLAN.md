@@ -113,16 +113,16 @@ After Phase 2 merges.
 
 ---
 
-### Phase 4 — Memory `[ ]`
+### Phase 4 — Memory `[x]`
 
 **Goal:** Agents have persistent memory across sessions.
 After Phase 2 merges. Scope reduced for v0.1: simple text injection only (no semantic index — see v0.2).
 
-- `[ ]` `core/memory/para_store.py` — filesystem PARA management in `~/.lmagent-plus/memory/`
-- `[ ]` Global memory injection into `core/agent.py`'s plugin pipeline (trunated to `max_global_tokens`)
-- `[ ]` Per-agent memory injection (truncated to `max_agent_tokens`)
-- `[ ]` Session auto-archive to `~/.lmagent-plus/sessions/` at end of conversation
-- `[ ]` Update `recent_tasks.md` at end of session
+- `[x]` `core/memory/para_store.py` — filesystem PARA management in `~/.lmagent-plus/memory/`
+- `[x]` Global memory injection into `core/agent.py`'s plugin pipeline (truncated to `max_global_tokens`)
+- `[x]` Per-agent memory injection (truncated to `max_agent_tokens`)
+- `[x]` Session auto-archive to `~/.lmagent-plus/sessions/` at end of conversation
+- `[x]` Update `recent_tasks.md` at end of session
 
 **Exit criterion:** An agent remembers tasks from the previous session.
 
@@ -132,15 +132,15 @@ After Phase 2 merges. Scope reduced for v0.1: simple text injection only (no sem
 
 ---
 
-### Phase 5 — CLI `[ ]`
+### Phase 5 — CLI `[x]`
 
 **Goal:** Functional terminal interface (Textual TUI).
 After Phase 2 merges.
 
-- `[ ]` `cli/main.py` — Textual TUI: chat, agent selector, model selector
-- `[ ]` Tool call display in real time
-- `[ ]` Tool toggles from the CLI
-- `[ ]` WebSocket client connecting to the daemon on `config.daemon.port`
+- `[x]` `cli/main.py` — Textual TUI: chat, agent selector, model selector
+- `[x]` Tool call display in real time
+- `[x]` Tool toggles from the CLI
+- `[x]` WebSocket client connecting to the daemon on `config.daemon.port`
 
 **Exit criterion:** Full usage from terminal without GUI.
 

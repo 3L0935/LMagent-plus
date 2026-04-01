@@ -25,6 +25,10 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 
+[project.scripts]
+lmagent = "cli.__main__:main"
+lmagent-daemon = "core.__main__:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["core*", "cli*"]

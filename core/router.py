@@ -50,13 +50,46 @@ class Router:
         backend = self._config.routing.default
 
         if backend == "local":
-            raise NotImplementedError(
-                "Local backend not yet implemented — Phase 1 required."
-            )
-        if backend == "cloud" or backend == "auto":
+            return await self._local_completion(messages, tools)
+        if backend == "cloud":
             return await self._cloud_completion(messages, tools)
+        if backend == "auto":
+            try:
+                return await self._local_completion(messages, tools)
+            except (BackendError, OSError):
+                if not self._config.routing.auto_fallback:
+                    raise
+                return await self._cloud_completion(messages, tools)
 
         raise BackendError(f"Unknown backend: {backend!r}")
+
+    async def _local_completion(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None,
+    ) -> dict:
+        """Call llama-server's OpenAI-compatible API."""
+        local_cfg = self._config.backends.local
+        body: dict = {"messages": messages}
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
+
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(
+                    f"http://127.0.0.1:{local_cfg.port}/v1/chat/completions",
+                    json=body,
+                )
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            raise BackendError(
+                f"Cannot reach llama-server on port {local_cfg.port}. "
+                "Is the daemon running with a local model loaded?"
+            ) from exc
+
+        if resp.status_code != 200:
+            raise BackendError(f"llama-server error {resp.status_code}: {resp.text}")
+        return resp.json()
 
     async def _cloud_completion(
         self,

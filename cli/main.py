@@ -760,8 +760,8 @@ class LMAgentTUI(App[None]):
         )
 
         status_lines = [
-            "[green]Setup complete.[/green]",
-            f"  config.yaml — backend=[cyan]{backend}[/cyan], routing=[cyan]local[/cyan]",
+            "[green]Config written.[/green]",
+            f"  backend=[cyan]{backend}[/cyan]  routing=[cyan]local[/cyan]",
         ]
         if default_model:
             status_lines.append(f"  default model → [cyan]{default_model}[/cyan]")
@@ -769,17 +769,45 @@ class LMAgentTUI(App[None]):
             f"  preferences.md — language=[cyan]{escape(language)}[/cyan], "
             f"interests=[cyan]{escape(interests)}[/cyan]"
         )
-        if to_dl:
-            status_lines.append(
-                f"  Starting download of [cyan]{', '.join(to_dl)}[/cyan]…"
-            )
-        else:
-            status_lines.append("  [dim]Restart the daemon to use the new backend.[/dim]")
         self._write_system("\n".join(status_lines))
 
-        # Kick off downloads (daemon hot-reload if running, silent fail if not)
-        for model_id in to_dl:
+        # Download llama-server binary if missing
+        asyncio.create_task(self._wizard_download_server(backend, to_dl))
+
+    async def _wizard_download_server(self, backend: str, models_to_dl: list[str]) -> None:
+        """Download llama-server binary then kick off model downloads."""
+        from core.runtime.llama_manager import SERVER_BINARY, download_llama_server
+
+        if SERVER_BINARY.exists():
+            self._write_system(
+                f"  [dim]llama-server already present — skipping binary download.[/dim]"
+            )
+        else:
+            self._write_system(
+                f"  Downloading [cyan]llama-server[/cyan] ({backend})…"
+            )
+            _last_pct: list[int] = [-1]
+
+            def _srv_progress(pct: float) -> None:
+                step = int(pct * 10) * 10
+                if step != _last_pct[0]:
+                    _last_pct[0] = step
+                    self._write_system(f"  [dim]llama-server {step}%[/dim]")
+
+            try:
+                await download_llama_server(backend, on_progress=_srv_progress)
+                self._write_system("  [green]llama-server ready.[/green]")
+            except Exception as exc:
+                self._write_error(f"llama-server download failed: {escape(str(exc))}")
+                return
+
+        for model_id in models_to_dl:
             asyncio.create_task(self._download_and_reload(model_id))
+
+        if not models_to_dl:
+            self._write_system(
+                "[green]Setup complete.[/green]  Restart the daemon to use the new backend."
+            )
 
     # ── Model download + hot-reload ───────────────────────────────────────────
 

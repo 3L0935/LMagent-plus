@@ -340,14 +340,20 @@ class LocalBackendManager:
         """
         Ensure llama-server is running with *model_path*.
 
+        - Auto-downloads the binary if missing.
         - No-op if already running with the same model.
         - Hot-swaps if a different model is loaded.
         - Starts fresh if not running.
 
         Raises:
-            BackendError: Binary not found or server failed to start.
+            BackendError: Binary not found/download failed or server failed to start.
             RuntimeError: Server did not become ready in time.
         """
+        if not SERVER_BINARY.exists():
+            log.info("llama-server binary not found — downloading for backend=%s…",
+                     self._config.backends.local.backend)
+            await download_llama_server(self._config.backends.local.backend)
+
         async with self._lock:
             if self._proc is not None and self._proc.poll() is None:
                 if self._loaded_model == model_path:

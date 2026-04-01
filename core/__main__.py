@@ -4,7 +4,7 @@ import asyncio
 import logging
 import sys
 
-from core.config import load_config
+from core.config import load_config, load_dotenv
 from core.memory import PARAStore
 from core.memory.para_store import MEMORY_DIR
 from core.persona_loader import load_persona, make_system_prompt_hook
@@ -70,6 +70,7 @@ def _setup_logging(level: str) -> None:
 
 
 def main() -> None:
+    load_dotenv()
     config = load_config()
     _setup_logging(config.daemon.log_level)
 

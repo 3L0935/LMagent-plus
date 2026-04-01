@@ -84,6 +84,26 @@ class Config(BaseModel):
     gui: GUIConfig = Field(default_factory=GUIConfig)
 
 
+def load_dotenv(path: Path = USER_DIR / ".env") -> None:
+    """
+    Load KEY=VALUE pairs from ~/.lmagent-plus/.env into os.environ.
+    Silent no-op if the file does not exist.
+    Does not override variables already set in the environment.
+    """
+    if not path.exists():
+        return
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key:
+                os.environ.setdefault(key, value)
+
+
 def _create_defaults(path: Path) -> Config:
     """Write default config.yaml to path and return the config."""
     path.parent.mkdir(parents=True, exist_ok=True)

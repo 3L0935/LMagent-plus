@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -786,13 +787,14 @@ class LMAgentTUI(App[None]):
             self._write_system(
                 f"  Downloading [cyan]llama-server[/cyan] ({backend})…"
             )
-            _last_pct: list[int] = [-1]
+            _last_srv_t: list[float] = [0.0]
 
             def _srv_progress(pct: float) -> None:
-                step = int(pct * 10) * 10
-                if step != _last_pct[0]:
-                    _last_pct[0] = step
-                    self._write_system(f"  [dim]llama-server {step}%[/dim]")
+                now = time.monotonic()
+                if now - _last_srv_t[0] < 5.0:
+                    return
+                _last_srv_t[0] = now
+                self._write_system(f"  [dim]llama-server {int(pct * 100)}%[/dim]")
 
             try:
                 await download_llama_server(backend, on_progress=_srv_progress)
@@ -828,21 +830,19 @@ class LMAgentTUI(App[None]):
             "  [dim]CLI stays responsive — responses are not blocked.[/dim]"
         )
 
-        _last_pct: list[int] = [-1]
+        _last_dl_t: list[float] = [0.0]
 
         def _on_progress(received: int, total: int) -> None:
-            if total <= 0:
+            now = time.monotonic()
+            if now - _last_dl_t[0] < 5.0:
                 return
-            pct = int(received * 100 / total)
-            step = pct // 10 * 10  # report every 10 %
-            if step != _last_pct[0]:
-                _last_pct[0] = step
-                mb_done  = received / 1024 / 1024
-                mb_total = total / 1024 / 1024
-                # Running in the main event loop — direct call is correct
-                self._write_system(
-                    f"  [dim]{step}%  {mb_done:.0f} / {mb_total:.0f} MB[/dim]"
-                )
+            _last_dl_t[0] = now
+            mb_done  = received / 1024 / 1024
+            mb_total = total / 1024 / 1024 if total > 0 else 0
+            pct      = int(received * 100 / total) if total > 0 else 0
+            self._write_system(
+                f"  [dim]{pct}%  {mb_done:.0f} / {mb_total:.0f} MB[/dim]"
+            )
 
         try:
             await _download_model_httpx(

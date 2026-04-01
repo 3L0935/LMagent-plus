@@ -581,8 +581,9 @@ class LMAgentTUI(App[None]):
             self._wizard_data["routing"] = choice
             self._wizard_step = 1
             cloud_note = (
-                "\n  [dim]For cloud routing, set [bold]ANTHROPIC_API_KEY[/bold] or "
-                "[bold]OPENAI_API_KEY[/bold] in your shell environment.[/dim]"
+                "\n\n  [yellow]API keys required for cloud routing.[/yellow]\n"
+                "  Set [bold]ANTHROPIC_API_KEY[/bold] and/or [bold]OPENAI_API_KEY[/bold]\n"
+                "  in your shell before starting the daemon  (e.g. in ~/.bashrc or ~/.profile)."
                 if choice in ("cloud", "auto") else ""
             )
             best  = self._wizard_data.get("_best", "cpu")
@@ -665,10 +666,10 @@ class LMAgentTUI(App[None]):
             await self._wizard_show_confirm()
 
         elif step == 5:  # confirm
-            if text.strip().lower() in ("y", "yes"):
-                await self._apply_wizard()
-            else:
+            if text.strip().lower() in ("n", "no"):
                 self._write_system("[dim]Setup cancelled — no changes made.[/dim]")
+            else:
+                await self._apply_wizard()
             self._wizard_active = False
             self._wizard_step   = 0
 
@@ -762,7 +763,7 @@ class LMAgentTUI(App[None]):
         if default:
             lines.append(f"  Default:   [cyan]{default}[/cyan]")
         lines.append("")
-        lines.append("  [yellow]>[/yellow]  [bold]y[/bold] = apply   [bold]n[/bold] = cancel")
+        lines.append("  [yellow]>[/yellow]  [bold]Enter[/bold] = apply   [bold]n[/bold] = cancel")
         self._write_system("\n".join(lines))
 
     async def _apply_wizard(self) -> None:

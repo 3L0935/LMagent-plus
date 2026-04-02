@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import date
 from typing import TYPE_CHECKING
 
@@ -38,6 +39,7 @@ async def run_daemon(
     local_manager: "LocalBackendManager | None" = None,
 ) -> None:
     """Start the WebSocket IPC server and run until cancelled."""
+    _start_time = time.monotonic()
 
     # Pending system notifications — populated by callbacks (e.g. idle unload)
     # and drained by the next "poll" request from any CLI client.
@@ -76,6 +78,18 @@ async def run_daemon(
 
         method = data.get("method")
         req_id = data.get("id", "null")
+
+        if method == "ping":
+            model_name = ""
+            if local_manager is not None and local_manager.is_loaded:
+                model_name = config.backends.local.default_model
+            await websocket.send(RPCResponse.ok(req_id, {
+                "status": "ok",
+                "agent": agent_name,
+                "model": model_name,
+                "uptime_seconds": int(time.monotonic() - _start_time),
+            }).model_dump_json())
+            return
 
         if method == "poll":
             notifications = list(_notification_queue)

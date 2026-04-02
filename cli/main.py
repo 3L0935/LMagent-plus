@@ -8,7 +8,7 @@ Slash commands
 --------------
 /help              This help message
 /agent [name]      Switch active agent
-/persona           Show active persona info
+/persona [name]    Show persona info, or switch if name given
 /tools             List enabled tools for the active agent
 /model [name]      Load a model — downloads if needed, hot-reloads daemon (local routing)
 /models            List available models (cloud + local catalog)
@@ -67,7 +67,7 @@ HELP_TEXT = """\
 
   [bold]/help[/bold]              This help message
   [bold]/agent[/bold] \\[name]     Switch active agent (assistant | coder | writer | research)
-  [bold]/persona[/bold]           Show active persona info
+  [bold]/persona[/bold] \\[name]   Show persona info, or switch if name given
   [bold]/tools[/bold]             List enabled tools for the active agent
   [bold]/model[/bold] \\[name]     Load a model — downloads if needed, hot-reloads daemon (local)
   [bold]/models[/bold]            List available models (cloud + local catalog)
@@ -337,7 +337,21 @@ class LMAgentTUI(App[None]):
                     self._write_system(f"Switched to [green]@{self._persona}[/green]")
 
         elif cmd == "persona":
-            self._show_persona_info()
+            if args:
+                name = args[0].lower()
+                if name not in VALID_AGENTS:
+                    self._write_system(
+                        f"[red]Unknown persona '{escape(name)}'.[/red]  "
+                        f"Valid: {', '.join(sorted(VALID_AGENTS))}"
+                    )
+                else:
+                    self._persona = name
+                    self._ensure_agent_tab(name)
+                    self._switch_to_agent_tab(name)
+                    self._update_subtitle()
+                    self._write_system(f"Switched to [green]@{self._persona}[/green]")
+            else:
+                self._show_persona_info()
 
         elif cmd == "tools":
             self._show_tools()
@@ -1324,10 +1338,12 @@ class LMAgentTUI(App[None]):
         try:
             from core.persona_loader import load_persona
             p = load_persona(self._persona)
+            active_model = self._model_override or _active_model(self._config)
             self._write_system(
                 f"[bold]@{self._persona}[/bold]: {escape(p.get('description', '—'))}\n"
-                f"  model: {escape(str(p.get('default_model', '—')))}\n"
-                f"  memory: {escape(str(p.get('memory_context', '—')))}"
+                f"  model:  {escape(active_model)}\n"
+                f"  memory: {escape(str(p.get('memory_context', '—')))}\n"
+                f"  valid personas: {', '.join(sorted(VALID_AGENTS))}"
             )
         except Exception as exc:
             self._write_error(escape(str(exc)))

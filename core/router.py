@@ -29,6 +29,19 @@ class Router:
     ) -> None:
         self._config = config
         self._local_manager = local_manager
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Return the shared httpx client, creating it lazily."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=120)
+        return self._client
+
+    async def close(self) -> None:
+        """Close the persistent httpx client."""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def chat_completion(
         self,
@@ -91,11 +104,11 @@ class Router:
             body["tool_choice"] = "auto"
 
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(
-                    f"http://127.0.0.1:{local_cfg.port}/v1/chat/completions",
-                    json=body,
-                )
+            client = await self._get_client()
+            resp = await client.post(
+                f"http://127.0.0.1:{local_cfg.port}/v1/chat/completions",
+                json=body,
+            )
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             raise BackendError(
                 f"Cannot reach llama-server on port {local_cfg.port}. "
@@ -153,19 +166,19 @@ class Router:
                 for t in tools
             ]
 
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json=body,
-            )
-            if resp.status_code != 200:
-                raise BackendError(f"Anthropic API error {resp.status_code}: {resp.text}")
-            raw = resp.json()
+        client = await self._get_client()
+        resp = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=body,
+        )
+        if resp.status_code != 200:
+            raise BackendError(f"Anthropic API error {resp.status_code}: {resp.text}")
+        raw = resp.json()
 
         # Normalize to OpenAI-like response format
         return _normalize_anthropic(raw)
@@ -183,17 +196,17 @@ class Router:
             body["tools"] = tools
             body["tool_choice"] = "auto"
 
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-            )
-            if resp.status_code != 200:
-                raise BackendError(f"OpenAI API error {resp.status_code}: {resp.text}")
+        client = await self._get_client()
+        resp = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+        )
+        if resp.status_code != 200:
+            raise BackendError(f"OpenAI API error {resp.status_code}: {resp.text}")
             return resp.json()
 
 

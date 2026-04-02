@@ -83,6 +83,7 @@ def main() -> None:
 
     agent, store = _build_agent(config, local_manager=local_manager)
 
+    router = agent._router
     try:
         asyncio.run(
             run_daemon(config, agent=agent, store=store, agent_name=DEFAULT_PERSONA, local_manager=local_manager)
@@ -93,6 +94,7 @@ def main() -> None:
         if local_manager is not None:
             logging.getLogger(__name__).info("Stopping llama-server...")
             local_manager.shutdown()
+        asyncio.run(router.close())
     sys.exit(0)
 
 

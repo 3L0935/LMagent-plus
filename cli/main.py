@@ -108,6 +108,14 @@ RichLog {
     color: $text-muted;
 }
 
+#streaming-preview {
+    height: auto;
+    margin: 0 1;
+    padding: 0 1;
+    display: none;
+    color: $text;
+}
+
 Input {
     margin: 0 1 1 1;
 }
@@ -220,6 +228,9 @@ class LMAgentTUI(App[None]):
         self._wizard_data: dict[str, Any] = {}
         self._wizard_backends: list[str] = []
         self._wizard_catalog_picks: list[dict] = []
+        # Streaming state
+        self._stream_buffer: str = ""
+        self._stream_active: bool = False
         super().__init__()
 
     # ── Composition ────────────────────────────────────────────────────────────
@@ -230,6 +241,7 @@ class LMAgentTUI(App[None]):
             with TabPane("@assistant", id="tab-assistant"):
                 yield RichLog(markup=True, highlight=False, wrap=True, id="chat-assistant")
         yield Static("", id="completions", markup=True)
+        yield Static("", id="streaming-preview", markup=True)
         yield Input(placeholder="Type a message or /help…", id="input")
         yield Footer()
 
@@ -1105,10 +1117,41 @@ class LMAgentTUI(App[None]):
                             self._write_system(f"[green]{escape(msg)}[/green]")
                             self._update_subtitle("thinking…")
 
+                        elif etype == "text_start":
+                            self._stream_buffer = ""
+                            self._stream_active = True
+                            self._update_subtitle("streaming…")
+                            preview = self.query_one("#streaming-preview", Static)
+                            preview.display = True
+
+                        elif etype == "text_delta":
+                            self._stream_buffer += evt.get("content", "")
+                            preview = self.query_one("#streaming-preview", Static)
+                            preview.update(
+                                f"[bold green]@{self._persona}[/bold green]: "
+                                f"{escape(self._stream_buffer)}[blink]▍[/blink]"
+                            )
+
+                        elif etype == "text_end":
+                            self._stream_active = False
+                            preview = self.query_one("#streaming-preview", Static)
+                            preview.display = False
+                            if self._stream_buffer:
+                                self._write_assistant(self._stream_buffer)
+                                self._stream_buffer = ""
+                            self._update_subtitle("idle")
+
                         elif etype == "text":
                             pending_text.append(evt.get("content", ""))
 
                         elif etype == "tool_call":
+                            if self._stream_active:
+                                self._stream_active = False
+                                preview = self.query_one("#streaming-preview", Static)
+                                preview.display = False
+                                if self._stream_buffer:
+                                    self._write_assistant(self._stream_buffer)
+                                    self._stream_buffer = ""
                             if pending_text:
                                 self._write_assistant("".join(pending_text))
                                 pending_text = []

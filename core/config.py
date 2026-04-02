@@ -46,6 +46,20 @@ class BackendsConfig(BaseModel):
     cloud: CloudBackendConfig = Field(default_factory=CloudBackendConfig)
 
 
+class SecurityConfig(BaseModel):
+    allowed_paths: list[str] = []  # empty = no restriction (backward compat)
+    blocked_paths: list[str] = [
+        "/etc", "/var", "/usr", "/boot", "/dev", "/proc", "/sys",
+        "~/.ssh", "~/.gnupg", "~/.config/systemd",
+    ]
+    bash_blocked_patterns: list[str] = [
+        "rm -rf /", "rm -rf /*", "mkfs", "dd if=",
+        ":(){ :|:&", "> /dev/sd", "chmod -R 777 /",
+        "curl * | sh", "curl * | bash", "wget * | sh", "wget * | bash",
+    ]
+    bash_max_timeout: int = 120  # hard cap on timeout, model can't override
+
+
 class RoutingConfig(BaseModel):
     default: Literal["local", "cloud", "auto"] = "cloud"
     auto_fallback: bool = True
@@ -81,6 +95,7 @@ class Config(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
     gui: GUIConfig = Field(default_factory=GUIConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
 
 
 def load_dotenv(path: Path = USER_DIR / ".env") -> None:

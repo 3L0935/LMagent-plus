@@ -9,8 +9,8 @@ from core.memory import PARAStore
 from core.memory.para_store import MEMORY_DIR
 from core.persona_loader import load_persona, make_system_prompt_hook
 from core.tool_registry import ToolRegistry
-from core.tools.bash import BASH_TOOL
-from core.tools.file_ops import READ_FILE_TOOL, WRITE_FILE_TOOL, LIST_DIRECTORY_TOOL
+from core.tools.bash import make_bash_tool
+from core.tools.file_ops import make_file_ops_tools
 from core.tools.git import GIT_CLONE_TOOL, GIT_STATUS_TOOL, GIT_LOG_TOOL
 from core.tools.call_agent import make_call_agent_tool
 from core.tools.memory_ops import make_update_memory_tool
@@ -29,9 +29,10 @@ def _build_agent(config, local_manager=None) -> tuple[Agent, PARAStore]:
 
     # Registry with all bundled tools
     registry = ToolRegistry()
+    read_tool, write_tool, list_tool = make_file_ops_tools(config.security)
     for tool in [
-        BASH_TOOL,
-        READ_FILE_TOOL, WRITE_FILE_TOOL, LIST_DIRECTORY_TOOL,
+        make_bash_tool(config.security),
+        read_tool, write_tool, list_tool,
         GIT_CLONE_TOOL, GIT_STATUS_TOOL, GIT_LOG_TOOL,
     ]:
         registry.register(tool)

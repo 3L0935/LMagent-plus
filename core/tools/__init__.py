@@ -1,15 +1,5 @@
-from core.tools.bash import BASH_TOOL
-from core.tools.file_ops import READ_FILE_TOOL, WRITE_FILE_TOOL, LIST_DIRECTORY_TOOL
+from core.tools.bash import make_bash_tool
+from core.tools.file_ops import make_file_ops_tools
 from core.tools.git import GIT_CLONE_TOOL, GIT_STATUS_TOOL, GIT_LOG_TOOL
 
-ALL_TOOLS = [
-    BASH_TOOL,
-    READ_FILE_TOOL,
-    WRITE_FILE_TOOL,
-    LIST_DIRECTORY_TOOL,
-    GIT_CLONE_TOOL,
-    GIT_STATUS_TOOL,
-    GIT_LOG_TOOL,
-]
-
-__all__ = ["ALL_TOOLS"]
+__all__ = ["make_bash_tool", "make_file_ops_tools", "GIT_CLONE_TOOL", "GIT_STATUS_TOOL", "GIT_LOG_TOOL"]

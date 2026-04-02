@@ -49,7 +49,6 @@ class BackendsConfig(BaseModel):
 class RoutingConfig(BaseModel):
     default: Literal["local", "cloud", "auto"] = "cloud"
     auto_fallback: bool = True
-    auto_fallback_threshold: float = 0.7
 
 
 class MemoryConfig(BaseModel):

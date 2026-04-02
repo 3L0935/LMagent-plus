@@ -87,7 +87,6 @@ backends:
 routing:
   default: "local"              # local | cloud | auto
   auto_fallback: true           # if local fails → switch to cloud
-  auto_fallback_threshold: 0.7  # minimum confidence score before fallback
 
 # Memory
 memory:

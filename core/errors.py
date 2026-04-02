@@ -2,7 +2,7 @@ class LMAgentError(Exception):
     """Base exception for all LMAgent-Plus errors."""
 
 
-class RuntimeError(LMAgentError):
+class LLMRuntimeError(LMAgentError):
     """llama.cpp backend or subprocess failure."""
 
 

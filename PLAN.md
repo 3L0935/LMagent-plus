@@ -163,6 +163,28 @@ After Phase 5 ships.
 
 ---
 
+### Phase 5.3 — Security hardening + quality fixes `[~]`
+
+**Goal:** Fix security vulnerabilities in tool execution and improve robustness of the agent loop.
+Scope: no new features — only fixes, hardening, and missing quality-of-life improvements.
+
+- [x] Path sanitization in file_ops — block writes to sensitive system paths (`_path_guard.py`, `SecurityConfig`)
+- [x] Command injection fix in git tools — use `subprocess_exec` instead of shell string formatting
+- [x] Bash tool blocklist — configurable blocked patterns + timeout hard cap
+- [x] Streaming LLM responses — local + cloud, with non-streaming fallback
+- [x] Anthropic tool-result format — convert OpenAI-format tool messages for multi-turn cloud calls
+- [x] Persistent httpx client — reuse across requests instead of per-call creation
+- [x] Memory deduplication — prevent repeated entries on append
+- [x] Daemon healthcheck — `ping` IPC method
+- [x] Rename `RuntimeError` → `LLMRuntimeError` to avoid shadowing Python builtin
+- [x] Remove unused `auto_fallback_threshold` config field
+- [x] Shorten `call_agent` when_to_use hint for local model reliability
+- [x] Integration test — daemon ping + chat round-trip
+
+**Exit criterion:** `pytest` passes, no tool can write to `/etc` or `~/.ssh`, bash blocklist rejects `rm -rf /`, streaming works with llama-server, Anthropic multi-turn tool calling works.
+
+---
+
 ## v0.2 Phases (deferred)
 
 ### Phase 6 — Desktop GUI `[ ]`
@@ -241,3 +263,5 @@ Blocked until Phase 6 (reuses Svelte components).
 - **2026-04-02** — Fix daemon : `LocalBackendManager` toujours instancié au boot (JIT, coût nul) — supprime l'erreur "local backend not enabled" après `/setup` wizard. Wizard confirm : Enter = apply (était cancel). Wizard simplifié 7→5 steps (steps clés API supprimés, warning shell env à la place).
 - **2026-04-02** — `/reload` redéfini : restart complet du daemon via `daemon.restart` IPC → `os.execv(sys.executable, ["-m", "core"])`. CLI poll reconnect jusqu'à 10s. Fix `sys.argv` incompatible avec `uv run`. Wizard affiche hint `/reload` systématiquement après config écrit.
 - **2026-04-02** — Fix message "Loading model…" spurieux sur requêtes cloud (check routing avant JIT load dans daemon). Step "Idle unload" ajouté au wizard (secondes avant déchargement mémoire, 0=jamais, skippé routing=cloud). Wizard 5→6 steps.
+- **2026-04-02** — Phase 5.3 started. Security audit identified P0 issues: path traversal in file_ops, command injection in git tools, unrestricted bash execution. Also: missing streaming, broken Anthropic multi-turn, perf/quality fixes.
+- **2026-04-02** — Phase 5.3 complete. All 12 fixes applied: SecurityConfig + path guard, git subprocess_exec, bash blocklist, streaming (local+cloud+CLI), Anthropic tool-result conversion, persistent httpx client, memory dedup, ping healthcheck, LLMRuntimeError rename, auto_fallback_threshold removed, call_agent hint shortened, integration test added. 197 tests passing.

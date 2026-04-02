@@ -231,7 +231,7 @@ class LMAgentTUI(App[None]):
         # Autocomplete navigation state
         self._completion_matches: list[str] = []
         self._completion_idx: int = -1
-        self._completing: bool = False  # suppress on_input_changed during fill
+        self._completion_base: str = ""  # original typed text that generated the match list
         super().__init__()
 
     # ── Composition ────────────────────────────────────────────────────────────
@@ -266,6 +266,7 @@ class LMAgentTUI(App[None]):
         self.query_one("#completions", Static).display = False
         self._completion_matches = []
         self._completion_idx = -1
+        self._completion_base = ""
         text = event.value.strip()
         event.input.clear()
 
@@ -1029,17 +1030,26 @@ class LMAgentTUI(App[None]):
     # ── Slash command autocomplete ─────────────────────────────────────────────
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        if self._completing:
-            return
         text = event.value
+        # If the change was caused by arrow/tab fill, text will be one of the known
+        # completions — recompute from _completion_base to preserve the full list.
+        if self._completion_matches and text in self._completion_matches:
+            matches = [c for c in SLASH_COMMANDS if c.startswith(self._completion_base.lower())]
+            if matches:
+                self._completion_matches = matches
+                self._render_completions()
+                return
+        # User is typing normally — recompute from scratch.
         if text.startswith("/") and " " not in text:
             matches = [c for c in SLASH_COMMANDS if c.startswith(text.lower())]
             if matches:
                 self._completion_matches = matches
+                self._completion_base = text
                 self._completion_idx = -1
                 self._render_completions()
                 return
         self._completion_matches = []
+        self._completion_base = ""
         self._completion_idx = -1
         self.query_one("#completions", Static).display = False
 
@@ -1057,12 +1067,10 @@ class LMAgentTUI(App[None]):
     def _apply_completion(self, idx: int) -> None:
         """Fill the input with the completion at idx and move cursor to end."""
         selected = self._completion_matches[idx]
-        self._completing = True
         inp = self.query_one("#input", Input)
         inp.value = selected
         inp.cursor_position = len(selected)
-        self._completing = False
-        self._render_completions()
+        # on_input_changed will fire async and re-render from _completion_base
 
     def on_key(self, event) -> None:
         if not self._completion_matches:

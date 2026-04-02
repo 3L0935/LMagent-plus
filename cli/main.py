@@ -7,9 +7,8 @@ The daemon must be started separately:  python -m core
 Slash commands
 --------------
 /help              This help message
-/agent [name]      Switch active agent
 /persona [name]    Show persona info, or switch if name given
-/tools             List enabled tools for the active agent
+/tools             List enabled tools for the active persona
 /model [name]      Load a model — downloads if needed, hot-reloads daemon (local routing)
 /models            List available models (cloud + local catalog)
 /hf [query]        Search HuggingFace for GGUF models
@@ -48,7 +47,7 @@ _CLI_STATE = Path.home() / ".lmagent-plus" / "cli_state.json"
 _USER_DIR   = Path.home() / ".lmagent-plus"
 
 SLASH_COMMANDS = [
-    "/help", "/agent", "/persona", "/tools",
+    "/help", "/persona", "/tools",
     "/model", "/models", "/hf", "/setup",
     "/reload", "/clear", "/stop", "/status",
 ]
@@ -60,15 +59,12 @@ def _active_model(config: Config) -> str:
     return config.backends.cloud.anthropic.default_model
 
 
-VALID_AGENTS = {"assistant", "coder", "writer", "research"}
-
 HELP_TEXT = """\
 [bold cyan]LMAgent-Plus[/bold cyan] — slash commands
 
   [bold]/help[/bold]              This help message
-  [bold]/agent[/bold] \\[name]     Switch active agent (assistant | coder | writer | research)
   [bold]/persona[/bold] \\[name]   Show persona info, or switch if name given
-  [bold]/tools[/bold]             List enabled tools for the active agent
+  [bold]/tools[/bold]             List enabled tools for the active persona
   [bold]/model[/bold] \\[name]     Load a model — downloads if needed, hot-reloads daemon (local)
   [bold]/models[/bold]            List available models (cloud + local catalog)
   [bold]/hf[/bold] \\[query]       Search HuggingFace for GGUF models
@@ -316,33 +312,15 @@ class LMAgentTUI(App[None]):
         elif cmd == "clear":
             self._chat().clear()
 
-        elif cmd == "agent":
-            if not args:
-                self._write_system(
-                    f"Active agent: [green]@{self._persona}[/green]\n"
-                    f"  Valid: {', '.join(sorted(VALID_AGENTS))}"
-                )
-            else:
-                name = args[0].lower()
-                if name not in VALID_AGENTS:
-                    self._write_system(
-                        f"[red]Unknown agent '{escape(name)}'.[/red]  "
-                        f"Valid: {', '.join(sorted(VALID_AGENTS))}"
-                    )
-                else:
-                    self._persona = name
-                    self._ensure_agent_tab(name)
-                    self._switch_to_agent_tab(name)
-                    self._update_subtitle()
-                    self._write_system(f"Switched to [green]@{self._persona}[/green]")
-
         elif cmd == "persona":
             if args:
+                from core.persona_loader import list_personas as _list_personas
+                valid = _list_personas()
                 name = args[0].lower()
-                if name not in VALID_AGENTS:
+                if name not in valid:
                     self._write_system(
                         f"[red]Unknown persona '{escape(name)}'.[/red]  "
-                        f"Valid: {', '.join(sorted(VALID_AGENTS))}"
+                        f"Valid: {', '.join(sorted(valid))}"
                     )
                 else:
                     self._persona = name
@@ -1336,15 +1314,36 @@ class LMAgentTUI(App[None]):
 
     def _show_persona_info(self) -> None:
         try:
-            from core.persona_loader import load_persona
+            from core.persona_loader import load_persona, list_personas as _list_personas
             p = load_persona(self._persona)
             active_model = self._model_override or _active_model(self._config)
-            self._write_system(
-                f"[bold]@{self._persona}[/bold]: {escape(p.get('description', '—'))}\n"
-                f"  model:  {escape(active_model)}\n"
-                f"  memory: {escape(str(p.get('memory_context', '—')))}\n"
-                f"  valid personas: {', '.join(sorted(VALID_AGENTS))}"
-            )
+
+            lines = [
+                f"[bold]@{self._persona}[/bold]: {escape(p.get('description', '—'))}",
+                f"  model:  {escape(active_model)}",
+            ]
+
+            # Show actual memory files with sizes
+            global_dir = _USER_DIR / "memory" / "global"
+            agent_dir  = _USER_DIR / "memory" / "agents" / self._persona
+            for label, dir_path in [("global memory", global_dir), (f"persona memory ({self._persona})", agent_dir)]:
+                if dir_path.exists():
+                    files = sorted(dir_path.glob("*.md"))
+                    if files:
+                        lines.append(f"  {label}:")
+                        for f in files:
+                            size_kb = f.stat().st_size / 1024
+                            lines.append(
+                                f"    [dim]{escape(str(f))}[/dim]  "
+                                f"[dim]({size_kb:.1f} KB)[/dim]"
+                            )
+                    else:
+                        lines.append(f"  {label}: [dim](empty)[/dim]")
+                else:
+                    lines.append(f"  {label}: [dim](not initialised)[/dim]")
+
+            lines.append(f"  valid personas: {', '.join(sorted(_list_personas()))}")
+            self._write_system("\n".join(lines))
         except Exception as exc:
             self._write_error(escape(str(exc)))
 

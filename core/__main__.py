@@ -7,7 +7,7 @@ import sys
 from core.config import load_config, load_dotenv
 from core.memory import PARAStore
 from core.memory.para_store import MEMORY_DIR
-from core.persona_loader import load_persona, make_system_prompt_hook
+from core.persona_loader import load_persona, list_personas, resolve_tool_names, make_system_prompt_hook
 from core.tool_registry import ToolRegistry
 from core.tools.bash import make_bash_tool
 from core.tools.file_ops import make_file_ops_tools
@@ -19,47 +19,64 @@ from core.router import AgentRouter, Router
 from core.agent import Agent
 from core.daemon import run_daemon
 
-DEFAULT_PERSONA = "assistant"
 
+def _build_agents(config, store: PARAStore, router: Router) -> dict[str, Agent]:
+    """Build one Agent per available persona, each with a filtered tool registry
+    and per-persona memory hooks.
 
-def _build_agent(config, local_manager=None) -> tuple[Agent, PARAStore]:
-    """Assemble a fully-wired Agent with memory hooks for the default persona."""
-    store = PARAStore(config.memory)
-    store.ensure_structure(DEFAULT_PERSONA)
-
-    # Registry with all bundled tools
-    registry = ToolRegistry()
+    Tools are resolved from persona YAML tools_enabled only — each persona gets
+    exactly the tools it declares, nothing more.  update_memory is always injected
+    as a system tool (not surfaced in tools_enabled YAML) so every persona can
+    persist learned patterns.
+    """
     read_tool, write_tool, list_tool = make_file_ops_tools(config.security)
-    for tool in [
-        make_bash_tool(config.security),
-        read_tool, write_tool, list_tool,
-        GIT_CLONE_TOOL, GIT_STATUS_TOOL, GIT_LOG_TOOL,
-    ]:
-        registry.register(tool)
+    base_tools = {
+        "bash":          make_bash_tool(config.security),
+        "read_file":     read_tool,
+        "write_file":    write_tool,
+        "list_directory": list_tool,
+        "git_clone":     GIT_CLONE_TOOL,
+        "git_status":    GIT_STATUS_TOOL,
+        "git_log":       GIT_LOG_TOOL,
+    }
 
-    # call_agent — Phase 2.5 multi-agent delegation
-    registry.register(make_call_agent_tool(AgentRouter(), registry))
-
-    # update_memory — persist preferences and learned patterns across sessions
-    registry.register(make_update_memory_tool(DEFAULT_PERSONA, MEMORY_DIR))
-
-    # Memory hooks
+    app_hook    = make_app_system_hook()
     global_hook = store.make_global_memory_hook()
-    agent_hook = store.make_agent_memory_hook(DEFAULT_PERSONA)
+    agents: dict[str, Agent] = {}
 
-    # Persona hook — embeds agent memory into {memory_context}
-    persona = load_persona(DEFAULT_PERSONA)
-    persona_hook = make_system_prompt_hook(persona, registry, memory_fn=agent_hook)
+    for persona_name in list_personas():
+        try:
+            persona = load_persona(persona_name)
+            store.ensure_structure(persona_name)
 
-    # App-level system prompt — injected first, before persona and memory
-    app_hook = make_app_system_hook()
+            enabled_names = set(resolve_tool_names(persona["tools_enabled"]))
+            registry = ToolRegistry()
 
-    agent = Agent(
-        router=Router(config, local_manager=local_manager),
-        tool_registry=registry,
-        system_prompt_hooks=[app_hook, global_hook, persona_hook],
-    )
-    return agent, store
+            for name, tool in base_tools.items():
+                if name in enabled_names:
+                    registry.register(tool)
+
+            if "call_agent" in enabled_names:
+                registry.register(make_call_agent_tool(AgentRouter(), registry))
+
+            # update_memory: always available (system tool, not listed in tools_enabled)
+            registry.register(make_update_memory_tool(persona_name, MEMORY_DIR))
+
+            agent_hook   = store.make_agent_memory_hook(persona_name)
+            persona_hook = make_system_prompt_hook(persona, registry, memory_fn=agent_hook)
+
+            agents[persona_name] = Agent(
+                router=router,
+                tool_registry=registry,
+                system_prompt_hooks=[app_hook, global_hook, persona_hook],
+            )
+            logging.getLogger(__name__).debug("Loaded persona: %s", persona_name)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Could not load persona '%s': %s", persona_name, exc
+            )
+
+    return agents
 
 
 def _setup_logging(level: str) -> None:
@@ -81,12 +98,21 @@ def main() -> None:
         "JIT local backend enabled — llama-server will start on first request."
     )
 
-    agent, store = _build_agent(config, local_manager=local_manager)
+    store  = PARAStore(config.memory)
+    router = Router(config, local_manager=local_manager)
+    agents = _build_agents(config, store, router)
 
-    router = agent._router
+    if not agents:
+        logging.getLogger(__name__).error("No personas loaded — cannot start daemon.")
+        sys.exit(1)
+
+    logging.getLogger(__name__).info(
+        "Loaded %d persona(s): %s", len(agents), ", ".join(agents)
+    )
+
     try:
         asyncio.run(
-            run_daemon(config, agent=agent, store=store, agent_name=DEFAULT_PERSONA, local_manager=local_manager)
+            run_daemon(config, agents=agents, store=store, local_manager=local_manager)
         )
     except KeyboardInterrupt:
         logging.getLogger(__name__).info("Daemon stopped.")

@@ -31,8 +31,6 @@ tools_enabled:
 tools_optional:
   # v0.2: {name: web_search, when_to_use: "To fetch live data not present in local files"}
 
-memory_context: "resources"
-
 persona:
   display_name: "Research"
   avatar: "🔬"

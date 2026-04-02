@@ -19,8 +19,8 @@ fallback_model: "mistral-7b-q4"
 cloud_equivalent: "claude-sonnet-4-6"
 
 # System prompt injected at the start of each session.
-# {tools_list} → replaced with the list of active tools and their descriptions
-# {memory_context} → replaced with relevant memory content (Phase 4)
+# {tools_list}     → replaced with the list of active tools and their descriptions
+# {memory_context} → replaced with persona-specific memory content
 #
 # Writing rules for reliable behavior with local models:
 # 1. List tools explicitly — do not assume the model knows what is available
@@ -62,10 +62,6 @@ tools_optional:
   - name: git
     when_to_use: "After modifying tracked files, never before"
   # v0.2: web_search, mcp_bridge
-
-# Which PARA memory section to load into {memory_context} at startup
-# projects | areas | resources | all | none
-memory_context: "projects"
 
 # Visual identity (optional)
 persona:

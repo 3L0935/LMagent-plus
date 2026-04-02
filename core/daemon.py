@@ -30,15 +30,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_PERSONA = "assistant"
+
 
 async def run_daemon(
     config: Config,
-    agent: "Agent | None" = None,
+    agents: "dict[str, Agent]",
     store: "PARAStore | None" = None,
-    agent_name: str = "assistant",
     local_manager: "LocalBackendManager | None" = None,
 ) -> None:
-    """Start the WebSocket IPC server and run until cancelled."""
+    """Start the WebSocket IPC server and run until cancelled.
+
+    Routes each chat request to the Agent matching request.params.agent_id,
+    falling back to DEFAULT_PERSONA if the requested persona is not loaded.
+    """
     _start_time = time.monotonic()
 
     # Pending system notifications — populated by callbacks (e.g. idle unload)
@@ -48,7 +53,6 @@ async def run_daemon(
     def _push_notification(msg: str, level: str = "info") -> None:
         _notification_queue.append({"message": msg, "level": level})
 
-    # Wire idle-unload callback so the CLI can display it
     if local_manager is not None:
         local_manager._on_unload = lambda name: _push_notification(
             f"{name} unloaded (idle timeout)", level="warning"
@@ -85,7 +89,7 @@ async def run_daemon(
                 model_name = config.backends.local.default_model
             await websocket.send(RPCResponse.ok(req_id, {
                 "status": "ok",
-                "agent": agent_name,
+                "agents": list(agents.keys()),
                 "model": model_name,
                 "uptime_seconds": int(time.monotonic() - _start_time),
             }).model_dump_json())
@@ -107,10 +111,17 @@ async def run_daemon(
                 await websocket.send(error_resp.model_dump_json())
                 return
 
+            # Route to the requested persona; fall back to DEFAULT_PERSONA
+            agent_id = request.params.agent_id or DEFAULT_PERSONA
+            agent = agents.get(agent_id) or agents.get(DEFAULT_PERSONA)
             if agent is None:
-                err = RPCResponse.err(request.id, INTERNAL_ERROR, "Agent not initialized")
+                agent = next(iter(agents.values()), None)
+            if agent is None:
+                err = RPCResponse.err(request.id, INTERNAL_ERROR, "No agents loaded")
                 await websocket.send(err.model_dump_json())
                 return
+            # Use the actual resolved name for archiving
+            resolved_id = agent_id if agent_id in agents else DEFAULT_PERSONA
 
             if local_manager is not None and not local_manager.is_loaded and config.routing.default in ("local", "auto"):
                 model_name = config.backends.local.default_model or "local model"
@@ -140,7 +151,7 @@ async def run_daemon(
                 await websocket.send(err.model_dump_json())
                 return
 
-            _archive_session(config, store, agent_name, request.params.message, text_parts)
+            _archive_session(config, store, resolved_id, request.params.message, text_parts)
             await websocket.send(RPCResponse.ok(request.id, {"status": "complete"}).model_dump_json())
             return
 

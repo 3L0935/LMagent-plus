@@ -29,8 +29,6 @@ tools_enabled:
 
 tools_optional: []
 
-memory_context: "areas"
-
 persona:
   display_name: "Writer"
   avatar: "✍️"

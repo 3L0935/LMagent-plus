@@ -34,8 +34,6 @@ tools_optional:
   - name: git
     when_to_use: "When the task explicitly involves git operations"
 
-memory_context: "all"
-
 persona:
   display_name: "Assistant"
   avatar: "🤖"

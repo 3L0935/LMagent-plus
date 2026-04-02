@@ -48,8 +48,9 @@ async def test_ping_returns_ok():
     config = Config()
     config.daemon.port = port
 
+    agents = {"assistant": _mock_agent()}
     daemon_task = asyncio.create_task(
-        run_daemon(config, agent=None, agent_name="assistant")
+        run_daemon(config, agents=agents)
     )
     # Give the daemon a moment to bind
     await asyncio.sleep(0.1)
@@ -62,7 +63,7 @@ async def test_ping_returns_ok():
 
         assert data["result"]["status"] == "ok"
         assert "uptime_seconds" in data["result"]
-        assert data["result"]["agent"] == "assistant"
+        assert "assistant" in data["result"]["agents"]
     finally:
         daemon_task.cancel()
         try:
@@ -77,10 +78,9 @@ async def test_chat_round_trip():
     config = Config()
     config.daemon.port = port
 
-    agent = _mock_agent("integration test response")
-
+    agents = {"assistant": _mock_agent("integration test response")}
     daemon_task = asyncio.create_task(
-        run_daemon(config, agent=agent, agent_name="assistant")
+        run_daemon(config, agents=agents)
     )
     await asyncio.sleep(0.1)
 
@@ -89,7 +89,7 @@ async def test_chat_round_trip():
             chat_request = {
                 "jsonrpc": "2.0",
                 "method": "chat",
-                "params": {"message": "test message", "agent_id": None, "model_id": None},
+                "params": {"message": "test message", "agent_id": "assistant", "model_id": None},
                 "id": "req-1",
             }
             await ws.send(json.dumps(chat_request))

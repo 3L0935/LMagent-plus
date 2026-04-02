@@ -34,8 +34,6 @@ tools_enabled:
 
 tools_optional: []
 
-memory_context: "projects"
-
 persona:
   display_name: "Coder"
   avatar: "💻"

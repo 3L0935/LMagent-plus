@@ -6,39 +6,27 @@
 
 ## What is this?
 
-LMAgent-Plus is an all-in-one AI agent platform that runs entirely on your machine.
+LMAgent-Plus is an AI agent platform that runs entirely on your machine.
 
-It downloads and manages **llama.cpp internally** — no Ollama, no LM Studio, no external dependency to install first. Pick a model, it downloads it, it runs. That's it.
+It downloads and manages **llama.cpp internally** — no Ollama, no LM Studio, nothing to install first. Pick a model, it downloads it, it runs.
 
-You get a **desktop GUI**, a **CLI**, and an optional **web interface** (Tailscale-friendly), all talking to the same local daemon.
-
----
-
-## Why another orchestrator?
-
-Because the existing ones either:
-- Require you to install 3 other things before they work
-- Work great with cloud APIs, break with local models
-- Give you an empty framework and zero working presets
-- Are a great demo that falls apart on real tasks
-
-LMAgent-Plus ships with **tested agent presets** that actually behave correctly with local models — meaning when you say "clone this repo", the agent runs `git clone`, not open a browser.
+A Python daemon handles the agent loop, tool execution, and memory. A Textual TUI connects to it over WebSocket. Cloud APIs (Anthropic, OpenAI) are supported as an alternative or fallback to local models.
 
 ---
 
-## Features
+## What works right now (v0.1)
 
-- **Self-contained runtime** — downloads llama.cpp binaries automatically (CUDA / ROCm / Vulkan / Metal / CPU)
-- **Built-in model manager** — pull models from HuggingFace directly from the app
-- **Smart backend selection** — detects your GPU and recommends the right backend
-- **Agent presets** — `@coder`, `@writer`, `@research`, `@assistant` — ready to use out of the box
-- **Custom personas** — define your own agents in YAML, no code required
-- **Tool use that works** — strict tool schemas that prevent local models from hallucinating actions
-- **Two-layer memory** — global context shared across agents + private memory per agent
-- **MCP support** — connect external MCP servers
-- **Cloud fallback** — optionally route to Claude, GPT-4 or others when needed
-- **Three surfaces** — desktop GUI (Tauri), terminal TUI (Textual), web UI (optional)
-- **Everything in `~/.lmagent-plus/`** — clean, readable, editable by hand or by an agent
+- **Self-contained runtime** — downloads the right llama.cpp binary automatically (CUDA / ROCm / Vulkan / Metal / CPU)
+- **Built-in model manager** — pull models from HuggingFace directly from the TUI (`/hf`, `/model`)
+- **Multi-persona routing** — `@assistant`, `@coder`, `@writer`, `@research` — each with its own tool set, system prompt, and memory
+- **Tool use** — bash, file read/write/list, git, memory persistence (`update_memory`), agent delegation (`call_agent`)
+- **Two-layer memory** — global context shared across personas + private memory per persona, injected at the start of each session
+- **Streaming responses** — real-time output for local (llama-server SSE) and cloud (Anthropic / OpenAI)
+- **Security** — path guard (blocks writes to `/etc`, `~/.ssh`, etc.), bash blocklist, git command injection protection
+- **Cloud routing** — route requests to Anthropic or OpenAI instead of (or alongside) a local model
+- **TUI** — slash commands, arrow key autocomplete, tab switching between agents, live tool call display, theme persistence
+
+**Not yet available** — desktop GUI, web interface, installer scripts, MCP bridge, web search. See [PLAN.md](PLAN.md).
 
 ---
 
@@ -46,41 +34,89 @@ LMAgent-Plus ships with **tested agent presets** that actually behave correctly 
 
 | Backend | Hardware | Notes |
 |---------|----------|-------|
-| CUDA | NVIDIA GPUs | Best performance on NVIDIA |
-| ROCm | AMD workstation GPUs | Requires ROCm installed |
-| Vulkan | AMD / Intel on Linux | Recommended for AMD RX series |
-| Metal | Apple Silicon | Native on macOS |
-| CPU | Any | Fallback — slow on models >7B |
+| CUDA    | NVIDIA GPUs | Best performance on NVIDIA |
+| ROCm    | AMD workstation GPUs | Requires ROCm installed |
+| Vulkan  | AMD / Intel on Linux | Recommended for AMD RX series |
+| Metal   | Apple Silicon | Native on macOS |
+| CPU     | Any | Fallback — slow on models >7B |
 
 ---
 
-## Quickstart
+## Try it
+
+### Requirements
+
+- Python 3.10+
+- [`uv`](https://github.com/astral-sh/uv) (recommended) or pip
+
+### Install
 
 ```bash
-# Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/3L0935/LMagent-plus/main/installer/install.sh | bash
-
-# Windows
-irm https://raw.githubusercontent.com/3L0935/LMagent-plus/installer/install.ps1 | iex
+git clone https://github.com/3L0935/LMagent-plus.git
+cd LMagent-plus
+uv sync
 ```
 
-The installer will:
-1. Detect your OS, GPU, and available VRAM
-2. Download the right llama.cpp binary
-3. Recommend a model based on your hardware
-4. Download the model
-5. Launch the app
+### Run
+
+In one terminal, start the daemon:
+
+```bash
+./serve
+# or: uv run lmagent-daemon
+```
+
+In another terminal, start the TUI:
+
+```bash
+./chat
+# or: uv run lmagent
+```
+
+### First steps in the TUI
+
+```
+/setup          guided setup — backend, routing, model download
+/hf mistral     search HuggingFace for GGUF models
+/model <id>     download and load a model
+/persona coder  switch to the coder persona
+/tools          list tools available for the active persona
+/help           full command reference
+```
+
+Use **Up / Down / Tab** to navigate slash command autocomplete.
+
+### Cloud-only (no local model)
+
+Set your API key in the shell before starting the daemon:
+
+```bash
+export ANTHROPIC_API_KEY=sk-...
+# or
+export OPENAI_API_KEY=sk-...
+```
+
+Then set routing in `~/.lmagent-plus/config.yaml`:
+
+```yaml
+routing:
+  default: cloud
+```
 
 ---
 
-## Agent presets
+## Personas
 
-| Preset | Best model | Tools | Use for |
-|--------|-----------|-------|---------|
-| `@coder` | Qwen3-Coder | bash, file_ops, git | Development tasks |
-| `@writer` | Mistral 7B | file_ops | Writing, summarizing |
-| `@research` | DeepSeek R1 | web_search | Analysis, reasoning |
-| `@assistant` | Mistral 7B | configurable | General purpose |
+| Persona | Recommended local model | Tools | Use for |
+|---------|------------------------|-------|---------|
+| `@assistant` | Mistral 7B | bash, file_ops, call_agent | General purpose, delegation |
+| `@coder` | Qwen3-Coder 30B | bash, file_ops, git | Development tasks |
+| `@writer` | Mistral 7B | file_ops | Writing, editing, summarizing |
+| `@research` | DeepSeek R1 8B | file_ops | Analysis, reasoning, document review |
+
+Switch with `/persona <name>`. Each persona gets its own memory under `~/.lmagent-plus/memory/agents/<name>/`.
+
+Custom personas: copy `personas/_base.yaml`, edit, drop in `~/.lmagent-plus/personas/` — no code required.
 
 ---
 
@@ -88,28 +124,36 @@ The installer will:
 
 ```
 lmagent-plus/
-├── core/          # Python daemon — agent loop, tool registry, memory, runtime
-├── personas/      # Agent presets in YAML — main contribution point
-├── gui/           # Desktop app (Tauri + Svelte)
-├── cli/           # Terminal TUI (Python + Textual)
-├── web/           # Optional web server
-└── installer/     # One-command install scripts
+├── core/          # Daemon — agent loop, tool registry, memory, runtime, router
+├── cli/           # Terminal TUI (Textual)
+├── personas/      # Agent presets in YAML
+├── installer/     # Model catalog (recommended.yaml) — install scripts deferred to v0.2
+├── docs/          # Architecture, memory, runtime, persona format docs
+└── tests/         # pytest suite (197 tests)
 ```
 
 User data lives in `~/.lmagent-plus/` — see [docs/USER_DIR.md](docs/USER_DIR.md).
 
 ---
 
+## Run tests
+
+```bash
+uv run pytest
+```
+
+---
+
 ## Contributing
 
-The easiest way to contribute is **creating or improving agent personas** — no Python knowledge required, just YAML.
+The easiest entry point is **creating or improving personas** — no Python knowledge required.
 
 ```bash
 cp personas/_base.yaml personas/my-agent.yaml
 # edit, test, open a PR
 ```
 
-For everything else, see [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+For everything else: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ---
 
@@ -127,11 +171,10 @@ For everything else, see [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/ARCHITECTU
 
 ## Status
 
-Early development — not ready for production use.
-
-See [PLAN.md](PLAN.md) for the current roadmap and phase status.
+Active development — v0.1 core is complete and tested. See [PLAN.md](PLAN.md) for the roadmap.
 
 ---
 
 ## License
-See [LICENCE.md](LICENCE.md)
+
+See [LICENSE](LICENSE)

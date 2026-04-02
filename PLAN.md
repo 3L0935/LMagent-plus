@@ -163,7 +163,7 @@ After Phase 5 ships.
 
 ---
 
-### Phase 5.3 — Security hardening + quality fixes `[~]`
+### Phase 5.3 — Security hardening + quality fixes `[x]`
 
 **Goal:** Fix security vulnerabilities in tool execution and improve robustness of the agent loop.
 Scope: no new features — only fixes, hardening, and missing quality-of-life improvements.
@@ -265,3 +265,4 @@ Blocked until Phase 6 (reuses Svelte components).
 - **2026-04-02** — Fix message "Loading model…" spurieux sur requêtes cloud (check routing avant JIT load dans daemon). Step "Idle unload" ajouté au wizard (secondes avant déchargement mémoire, 0=jamais, skippé routing=cloud). Wizard 5→6 steps.
 - **2026-04-02** — Phase 5.3 started. Security audit identified P0 issues: path traversal in file_ops, command injection in git tools, unrestricted bash execution. Also: missing streaming, broken Anthropic multi-turn, perf/quality fixes.
 - **2026-04-02** — Phase 5.3 complete. All 12 fixes applied: SecurityConfig + path guard, git subprocess_exec, bash blocklist, streaming (local+cloud+CLI), Anthropic tool-result conversion, persistent httpx client, memory dedup, ping healthcheck, LLMRuntimeError rename, auto_fallback_threshold removed, call_agent hint shortened, integration test added. 197 tests passing.
+- **2026-04-02** — Multi-persona daemon routing. Daemon now routes each request by agent_id to its own Agent instance. Each persona has a filtered ToolRegistry (only tools_enabled), per-persona memory hooks, and isolated system prompt. /agent CLI command removed (duplicate of /persona). /persona info shows actual memory file paths + sizes. memory_context field removed from all persona YAMLs (was vestigial). 197 tests passing.

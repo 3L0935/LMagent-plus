@@ -63,7 +63,10 @@ class Agent:
         Execute the agent loop for a single user message.
 
         Yields events:
-          {"type": "text",        "content": str}
+          {"type": "text_start"}                        — streaming text begins
+          {"type": "text_delta",  "content": str}       — one token (streaming)
+          {"type": "text_end"}                          — streaming text ends
+          {"type": "text",        "content": str}       — full text (non-streaming fallback)
           {"type": "tool_call",   "name": str, "input": dict}
           {"type": "tool_result", "name": str, "output": dict}
           {"type": "error",       "message": str}
@@ -78,27 +81,55 @@ class Agent:
         tools_api = self._registry.to_api_format()
 
         for iteration in range(self._max_iterations):
+            # --- Attempt streaming first, fallback to non-streaming ---
+            text_parts: list[str] = []
+            tool_calls: list[dict] = []
+            streaming_ok = False
+
+            yield {"type": "text_start"}
             try:
-                response = await self._router.chat_completion(
+                async for chunk in self._router.chat_completion_stream(
                     messages=messages,
                     tools=tools_api or None,
                     model=model,
-                )
-            except Exception as exc:
-                yield {"type": "error", "message": f"LLM call failed: {exc}"}
-                break
+                ):
+                    if chunk["type"] == "text_delta":
+                        text_parts.append(chunk["content"])
+                        yield {"type": "text_delta", "content": chunk["content"]}
+                    elif chunk["type"] == "tool_calls":
+                        tool_calls = chunk["tool_calls"]
+                    elif chunk["type"] == "done":
+                        streaming_ok = True
+                        break
+            except Exception:
+                streaming_ok = False
 
-            choice = response.get("choices", [{}])[0]
-            msg = choice.get("message", {})
-            finish_reason = choice.get("finish_reason", "stop")
+            if not streaming_ok:
+                # Fallback to non-streaming
+                text_parts = []
+                tool_calls = []
+                try:
+                    response = await self._router.chat_completion(
+                        messages=messages,
+                        tools=tools_api or None,
+                        model=model,
+                    )
+                    choice = response.get("choices", [{}])[0]
+                    msg = choice.get("message", {})
+                    text_content = msg.get("content") or ""
+                    if text_content:
+                        text_parts.append(text_content)
+                        yield {"type": "text", "content": text_content}
+                    tool_calls = msg.get("tool_calls") or []
+                except Exception as exc:
+                    yield {"type": "text_end"}
+                    yield {"type": "error", "message": f"LLM call failed: {exc}"}
+                    break
 
-            # Emit any text content
-            text_content = msg.get("content") or ""
-            if text_content:
-                yield {"type": "text", "content": text_content}
+            text_content = "".join(text_parts)
+            yield {"type": "text_end"}
 
             # Check for tool calls
-            tool_calls = msg.get("tool_calls") or []
             if not tool_calls:
                 # No more tool calls — we're done
                 break

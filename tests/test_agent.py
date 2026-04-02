@@ -238,3 +238,51 @@ class TestAgentSystemPromptHooks:
         messages = router.chat_completion.call_args[1]["messages"]
         roles = [m["role"] for m in messages]
         assert "system" not in roles
+
+
+class TestAgentStreaming:
+    @pytest.mark.asyncio
+    async def test_streaming_yields_text_start_delta_end(self):
+        """When router streams, agent emits text_start + text_delta + text_end."""
+
+        async def _mock_stream(messages, tools=None, model=None):
+            yield {"type": "text_delta", "content": "hello "}
+            yield {"type": "text_delta", "content": "world"}
+            yield {"type": "done"}
+
+        router = MagicMock()
+        router.chat_completion_stream = _mock_stream
+        agent = Agent(router=router, tool_registry=ToolRegistry())
+
+        events = await _collect(agent.run("test"))
+        types = [e["type"] for e in events]
+
+        assert "text_start" in types
+        assert "text_delta" in types
+        assert "text_end" in types
+        assert types[-1] == "done"
+
+        deltas = [e["content"] for e in events if e["type"] == "text_delta"]
+        assert "".join(deltas) == "hello world"
+
+    @pytest.mark.asyncio
+    async def test_streaming_fallback_on_error(self):
+        """When streaming fails, agent falls back to non-streaming chat_completion."""
+
+        async def _failing_stream(messages, tools=None, model=None):
+            raise RuntimeError("stream not available")
+            yield  # make it a generator
+
+        router = MagicMock()
+        router.chat_completion_stream = _failing_stream
+        router.chat_completion = AsyncMock(return_value=_make_text_response("fallback text"))
+        agent = Agent(router=router, tool_registry=ToolRegistry())
+
+        events = await _collect(agent.run("test"))
+        types = [e["type"] for e in events]
+
+        # Fallback emits text event (non-streaming) and done
+        assert "text" in types
+        assert types[-1] == "done"
+        text_events = [e for e in events if e["type"] == "text"]
+        assert text_events[0]["content"] == "fallback text"

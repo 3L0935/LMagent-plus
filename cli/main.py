@@ -206,6 +206,7 @@ class LMAgentTUI(App[None]):
     BINDINGS = [
         Binding("escape", "cancel_response", "Cancel", show=True),
         Binding("ctrl+c", "quit", "Quit", show=True),
+        Binding("tab", "complete_next", "Complete", show=False, priority=True),
     ]
 
     def __init__(self, config: Config) -> None:
@@ -227,6 +228,10 @@ class LMAgentTUI(App[None]):
         # Streaming state
         self._stream_buffer: str = ""
         self._stream_active: bool = False
+        # Autocomplete navigation state
+        self._completion_matches: list[str] = []
+        self._completion_idx: int = -1
+        self._completing: bool = False  # suppress on_input_changed during fill
         super().__init__()
 
     # ── Composition ────────────────────────────────────────────────────────────
@@ -259,6 +264,8 @@ class LMAgentTUI(App[None]):
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         self.query_one("#completions", Static).display = False
+        self._completion_matches = []
+        self._completion_idx = -1
         text = event.value.strip()
         event.input.clear()
 
@@ -1022,16 +1029,59 @@ class LMAgentTUI(App[None]):
     # ── Slash command autocomplete ─────────────────────────────────────────────
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        completions = self.query_one("#completions", Static)
+        if self._completing:
+            return
         text = event.value
-        if text.startswith("/"):
+        if text.startswith("/") and " " not in text:
             matches = [c for c in SLASH_COMMANDS if c.startswith(text.lower())]
             if matches:
-                parts = "  ".join(f"[bold cyan]{m}[/bold cyan]" for m in matches)
-                completions.update(parts)
-                completions.display = True
+                self._completion_matches = matches
+                self._completion_idx = -1
+                self._render_completions()
                 return
-        completions.display = False
+        self._completion_matches = []
+        self._completion_idx = -1
+        self.query_one("#completions", Static).display = False
+
+    def _render_completions(self) -> None:
+        parts = []
+        for i, m in enumerate(self._completion_matches):
+            if i == self._completion_idx:
+                parts.append(f"[bold white on blue] {m} [/bold white on blue]")
+            else:
+                parts.append(f"[bold cyan]{m}[/bold cyan]")
+        completions = self.query_one("#completions", Static)
+        completions.update("  ".join(parts))
+        completions.display = True
+
+    def _apply_completion(self, idx: int) -> None:
+        """Fill the input with the completion at idx and move cursor to end."""
+        selected = self._completion_matches[idx]
+        self._completing = True
+        inp = self.query_one("#input", Input)
+        inp.value = selected
+        inp.cursor_position = len(selected)
+        self._completing = False
+        self._render_completions()
+
+    def on_key(self, event) -> None:
+        if not self._completion_matches:
+            return
+        if event.key == "down":
+            event.prevent_default()
+            self._completion_idx = (self._completion_idx + 1) % len(self._completion_matches)
+            self._apply_completion(self._completion_idx)
+        elif event.key == "up":
+            event.prevent_default()
+            self._completion_idx = (self._completion_idx - 1) % len(self._completion_matches)
+            self._apply_completion(self._completion_idx)
+
+    def action_complete_next(self) -> None:
+        """Tab → advance to next completion (or do nothing if no completions)."""
+        if not self._completion_matches:
+            return
+        self._completion_idx = (self._completion_idx + 1) % len(self._completion_matches)
+        self._apply_completion(self._completion_idx)
 
     def _do_reload(self) -> None:
         """Apply model override — hot-reload daemon if routing=local."""

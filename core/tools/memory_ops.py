@@ -6,10 +6,13 @@ Paths are resolved internally so the model never needs to know the filesystem la
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from core.errors import ToolError
 from core.tool_registry import ToolDefinition
+
+logger = logging.getLogger(__name__)
 
 _VALID_TARGETS = {
     "global_preferences": ("global", "preferences.md"),
@@ -44,10 +47,25 @@ async def _update_memory(
     if mode == "overwrite":
         path.write_text(content, encoding="utf-8")
     else:
-        with path.open("a", encoding="utf-8") as f:
-            if content and not content.startswith("\n"):
+        # Deduplicate: skip lines already present (case-insensitive, stripped)
+        existing_lines: set[str] = set()
+        if path.exists():
+            existing_lines = {
+                line.strip().lower()
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            }
+
+        new_lines = [line for line in content.splitlines() if line.strip()]
+        unique_lines = [line for line in new_lines if line.strip().lower() not in existing_lines]
+        skipped = len(new_lines) - len(unique_lines)
+        if skipped:
+            logger.warning("update_memory: skipped %d duplicate line(s) for %s", skipped, target)
+
+        if unique_lines:
+            with path.open("a", encoding="utf-8") as f:
                 f.write("\n")
-            f.write(content)
+                f.write("\n".join(unique_lines))
 
     return {"success": True, "path": str(path), "target": target, "mode": mode}
 

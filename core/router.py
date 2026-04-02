@@ -8,6 +8,7 @@ Local backend (llama-server) is stubbed — added after Phase 1 merges.
 
 from __future__ import annotations
 
+import json
 import os
 from typing import TYPE_CHECKING, AsyncGenerator
 
@@ -137,16 +138,8 @@ class Router:
         api_key: str,
     ) -> dict:
         """Call Anthropic Messages API."""
-        # Anthropic uses a separate system message
-        system = None
-        filtered = []
-        for msg in messages:
-            if msg["role"] == "system":
-                system = msg["content"]
-            else:
-                filtered.append(msg)
-
-        body: dict = {"model": model, "max_tokens": 4096, "messages": filtered}
+        system, converted = _convert_messages_for_anthropic(messages)
+        body: dict = {"model": model, "max_tokens": 4096, "messages": converted}
         if system:
             body["system"] = system
         if tools:
@@ -267,6 +260,80 @@ class AgentRouter:
 
 # ---------------------------------------------------------------------------
 
+def _merge_consecutive_roles(messages: list[dict]) -> list[dict]:
+    """
+    Merge consecutive messages with the same role into one.
+
+    Anthropic requires strict user/assistant alternation.
+    Consecutive same-role messages are merged by combining their content.
+    """
+    if not messages:
+        return messages
+    merged: list[dict] = [messages[0]]
+    for msg in messages[1:]:
+        last = merged[-1]
+        if msg["role"] == last["role"]:
+            # Combine content — normalize both to lists of content blocks
+            last_content = last["content"]
+            new_content = msg["content"]
+            if isinstance(last_content, str):
+                last_content = [{"type": "text", "text": last_content}]
+            if isinstance(new_content, str):
+                new_content = [{"type": "text", "text": new_content}]
+            merged[-1] = {"role": last["role"], "content": last_content + new_content}
+        else:
+            merged.append(msg)
+    return merged
+
+
+def _convert_messages_for_anthropic(
+    messages: list[dict],
+) -> tuple[str | None, list[dict]]:
+    """
+    Convert OpenAI-format messages to Anthropic format.
+
+    Handles:
+    - system messages → extracted separately (returned as first element)
+    - tool role messages → converted to user messages with tool_result content blocks
+    - assistant messages with tool_calls → converted to assistant messages with tool_use blocks
+    """
+    system: str | None = None
+    converted: list[dict] = []
+
+    for msg in messages:
+        role = msg.get("role", "")
+        if role == "system":
+            system = msg["content"]
+        elif role == "tool":
+            converted.append({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": msg.get("tool_call_id", ""),
+                    "content": msg.get("content", ""),
+                }],
+            })
+        elif role == "assistant" and msg.get("tool_calls"):
+            content_blocks: list[dict] = []
+            if msg.get("content"):
+                content_blocks.append({"type": "text", "text": msg["content"]})
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {})
+                raw_args = fn.get("arguments", "{}")
+                input_data = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                content_blocks.append({
+                    "type": "tool_use",
+                    "id": tc.get("id", ""),
+                    "name": fn.get("name", ""),
+                    "input": input_data,
+                })
+            converted.append({"role": "assistant", "content": content_blocks})
+        else:
+            converted.append(msg)
+
+    return system, _merge_consecutive_roles(converted)
+
+
 def _normalize_anthropic(raw: dict) -> dict:
     """
     Convert Anthropic response to an OpenAI-compatible structure.
@@ -284,7 +351,6 @@ def _normalize_anthropic(raw: dict) -> dict:
         if block.get("type") == "text":
             text_parts.append(block["text"])
         elif block.get("type") == "tool_use":
-            import json
             tool_calls.append({
                 "id": block.get("id", f"call_{i}"),
                 "type": "function",

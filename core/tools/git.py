@@ -1,38 +1,68 @@
 """
-Git tools — clone, status, log. Delegates to bash_execute internally.
+Git tools — clone, status, log. Uses asyncio.create_subprocess_exec to avoid shell injection.
 """
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from core.errors import ToolError
 from core.tool_registry import ToolDefinition
-from core.tools.bash import bash_execute
+
+# Shell metacharacters that have no place in a legitimate git URL
+_URL_BLOCKED_CHARS = frozenset({";", "|", "&", "`", "$"})
+
+
+def _validate_git_url(url: str) -> None:
+    """Raise ToolError if the URL contains shell metacharacters."""
+    for ch in _URL_BLOCKED_CHARS:
+        if ch in url:
+            raise ToolError(
+                f"Invalid git URL: contains forbidden character {ch!r}"
+            )
 
 
 async def git_clone(url: str, dest: str) -> dict:
-    """Clone a git repository."""
-    result = await bash_execute(f"git clone {url!r} {dest!r}", timeout=120)
-    if result["returncode"] != 0:
-        raise ToolError(f"git clone failed: {result['stderr']}")
+    """Clone a git repository using subprocess exec (no shell injection)."""
+    _validate_git_url(url)
+    proc = await asyncio.create_subprocess_exec(
+        "git", "clone", "--", url, dest,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+    if proc.returncode != 0:
+        raise ToolError(f"git clone failed: {stderr.decode(errors='replace')}")
     return {"success": True, "path": str(Path(dest).resolve())}
 
 
 async def git_status(repo_path: str) -> dict:
     """Get git status of a repository."""
-    result = await bash_execute("git status", cwd=Path(repo_path))
-    if result["returncode"] != 0:
-        raise ToolError(f"git status failed: {result['stderr']}")
-    return {"output": result["stdout"]}
+    proc = await asyncio.create_subprocess_exec(
+        "git", "status",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=repo_path,
+    )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    if proc.returncode != 0:
+        raise ToolError(f"git status failed: {stderr.decode(errors='replace')}")
+    return {"output": stdout.decode(errors="replace")}
 
 
 async def git_log(repo_path: str, n: int = 10) -> dict:
     """Get the last n commits of a repository."""
-    result = await bash_execute(f"git log --oneline -n {n}", cwd=Path(repo_path))
-    if result["returncode"] != 0:
-        raise ToolError(f"git log failed: {result['stderr']}")
-    return {"output": result["stdout"]}
+    proc = await asyncio.create_subprocess_exec(
+        "git", "log", "--oneline", f"-n{n}",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=repo_path,
+    )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    if proc.returncode != 0:
+        raise ToolError(f"git log failed: {stderr.decode(errors='replace')}")
+    return {"output": stdout.decode(errors="replace")}
 
 
 GIT_CLONE_TOOL = ToolDefinition(

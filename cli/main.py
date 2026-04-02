@@ -1336,12 +1336,13 @@ class LMAgentTUI(App[None]):
         try:
             from core.persona_loader import load_persona, get_tools_list_str
             from core.tool_registry import ToolRegistry
-            from core.tools.bash import BASH_TOOL
-            from core.tools.file_ops import READ_FILE_TOOL, WRITE_FILE_TOOL, LIST_DIRECTORY_TOOL
+            from core.tools.bash import make_bash_tool
+            from core.tools.file_ops import make_file_ops_tools
             from core.tools.git import GIT_CLONE_TOOL, GIT_STATUS_TOOL, GIT_LOG_TOOL
             registry = ToolRegistry()
-            for t in [BASH_TOOL, READ_FILE_TOOL, WRITE_FILE_TOOL,
-                      LIST_DIRECTORY_TOOL, GIT_CLONE_TOOL, GIT_STATUS_TOOL, GIT_LOG_TOOL]:
+            read_tool, write_tool, list_tool = make_file_ops_tools(self._config.security)
+            for t in [make_bash_tool(self._config.security), read_tool, write_tool,
+                      list_tool, GIT_CLONE_TOOL, GIT_STATUS_TOOL, GIT_LOG_TOOL]:
                 registry.register(t)
             p        = load_persona(self._persona)
             tools_str = get_tools_list_str(p, registry)

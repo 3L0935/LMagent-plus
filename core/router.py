@@ -66,7 +66,7 @@ class Router:
             NotImplementedError: For local backend or stream=True.
         """
         if stream:
-            raise NotImplementedError("Streaming is not yet implemented.")
+            raise NotImplementedError("Use chat_completion_stream() for streaming.")
 
         backend = self._config.routing.default
 
@@ -85,6 +85,270 @@ class Router:
                 return await self._cloud_completion(messages, tools, model_override=model)
 
         raise BackendError(f"Unknown backend: {backend!r}")
+
+    async def chat_completion_stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        model: str | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        """
+        Streaming chat completion — yields dicts as tokens arrive.
+
+        Yields:
+            {"type": "text_delta", "content": "..."}  — one or more text tokens
+            {"type": "tool_calls", "tool_calls": [...]}  — accumulated tool calls (once)
+            {"type": "done"}  — end of stream
+
+        Raises:
+            BackendError, NotImplementedError
+        """
+        backend = self._config.routing.default
+
+        if backend == "local":
+            await self._jit_load()
+            async for chunk in self._local_completion_stream(messages, tools):
+                yield chunk
+        elif backend == "cloud":
+            async for chunk in self._cloud_completion_stream(messages, tools, model_override=model):
+                yield chunk
+        elif backend == "auto":
+            try:
+                await self._jit_load()
+                async for chunk in self._local_completion_stream(messages, tools):
+                    yield chunk
+            except (BackendError, OSError):
+                if not self._config.routing.auto_fallback:
+                    raise
+                async for chunk in self._cloud_completion_stream(messages, tools, model_override=model):
+                    yield chunk
+        else:
+            raise BackendError(f"Unknown backend: {backend!r}")
+
+    async def _local_completion_stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None,
+    ) -> AsyncGenerator[dict, None]:
+        """Stream from llama-server's OpenAI-compatible SSE endpoint."""
+        local_cfg = self._config.backends.local
+        body: dict = {"messages": messages, "stream": True}
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
+
+        client = await self._get_client()
+        try:
+            async with client.stream(
+                "POST",
+                f"http://127.0.0.1:{local_cfg.port}/v1/chat/completions",
+                json=body,
+                timeout=120,
+            ) as resp:
+                if resp.status_code != 200:
+                    content = await resp.aread()
+                    raise BackendError(f"llama-server error {resp.status_code}: {content.decode()}")
+
+                tool_calls_acc: dict[int, dict] = {}  # index → accumulated tool call
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]
+                    if data_str.strip() == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+
+                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    if delta.get("content"):
+                        yield {"type": "text_delta", "content": delta["content"]}
+
+                    for tc_delta in delta.get("tool_calls", []):
+                        idx = tc_delta.get("index", 0)
+                        if idx not in tool_calls_acc:
+                            tool_calls_acc[idx] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                        acc = tool_calls_acc[idx]
+                        if tc_delta.get("id"):
+                            acc["id"] = tc_delta["id"]
+                        fn = tc_delta.get("function", {})
+                        if fn.get("name"):
+                            acc["function"]["name"] += fn["name"]
+                        if fn.get("arguments"):
+                            acc["function"]["arguments"] += fn["arguments"]
+
+                if tool_calls_acc:
+                    yield {"type": "tool_calls", "tool_calls": list(tool_calls_acc.values())}
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            raise BackendError(
+                f"Cannot reach llama-server on port {local_cfg.port}."
+            ) from exc
+
+        yield {"type": "done"}
+
+    async def _cloud_completion_stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None,
+        model_override: str | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        """Route to the configured cloud provider for streaming."""
+        cloud_cfg = self._config.backends.cloud
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+        openai_key = os.environ.get("OPENAI_API_KEY")
+
+        if anthropic_key:
+            model = model_override or cloud_cfg.anthropic.default_model
+            async for chunk in self._anthropic_completion_stream(messages, tools, model, anthropic_key):
+                yield chunk
+        elif openai_key:
+            model = model_override or cloud_cfg.openai.default_model
+            async for chunk in self._openai_completion_stream(messages, tools, model, openai_key):
+                yield chunk
+        else:
+            raise BackendError("No cloud API key found. Set ANTHROPIC_API_KEY or OPENAI_API_KEY.")
+
+    async def _anthropic_completion_stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None,
+        model: str,
+        api_key: str,
+    ) -> AsyncGenerator[dict, None]:
+        """Stream from Anthropic Messages API (SSE)."""
+        system, converted = _convert_messages_for_anthropic(messages)
+        body: dict = {"model": model, "max_tokens": 4096, "messages": converted, "stream": True}
+        if system:
+            body["system"] = system
+        if tools:
+            body["tools"] = [
+                {
+                    "name": t["function"]["name"],
+                    "description": t["function"]["description"],
+                    "input_schema": t["function"]["parameters"],
+                }
+                for t in tools
+            ]
+
+        client = await self._get_client()
+        tool_calls_by_index: dict[int, dict] = {}
+        current_tool_index: int | None = None
+
+        async with client.stream(
+            "POST",
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=body,
+            timeout=120,
+        ) as resp:
+            if resp.status_code != 200:
+                content = await resp.aread()
+                raise BackendError(f"Anthropic API error {resp.status_code}: {content.decode()}")
+
+            event_type: str = ""
+            async for line in resp.aiter_lines():
+                if line.startswith("event: "):
+                    event_type = line[7:].strip()
+                elif line.startswith("data: "):
+                    try:
+                        data = json.loads(line[6:])
+                    except json.JSONDecodeError:
+                        continue
+
+                    if event_type == "content_block_start":
+                        block = data.get("content_block", {})
+                        if block.get("type") == "tool_use":
+                            idx = data.get("index", 0)
+                            current_tool_index = idx
+                            tool_calls_by_index[idx] = {
+                                "id": block.get("id", ""),
+                                "type": "function",
+                                "function": {"name": block.get("name", ""), "arguments": ""},
+                            }
+
+                    elif event_type == "content_block_delta":
+                        delta = data.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            yield {"type": "text_delta", "content": delta.get("text", "")}
+                        elif delta.get("type") == "input_json_delta" and current_tool_index is not None:
+                            tool_calls_by_index[current_tool_index]["function"]["arguments"] += delta.get("partial_json", "")
+
+                    elif event_type == "content_block_stop":
+                        current_tool_index = None
+
+                    elif event_type == "message_stop":
+                        break
+
+        if tool_calls_by_index:
+            yield {"type": "tool_calls", "tool_calls": list(tool_calls_by_index.values())}
+        yield {"type": "done"}
+
+    async def _openai_completion_stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None,
+        model: str,
+        api_key: str,
+    ) -> AsyncGenerator[dict, None]:
+        """Stream from OpenAI Chat Completions API (SSE)."""
+        body: dict = {"model": model, "messages": messages, "stream": True}
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
+
+        client = await self._get_client()
+        tool_calls_acc: dict[int, dict] = {}
+
+        async with client.stream(
+            "POST",
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+            timeout=120,
+        ) as resp:
+            if resp.status_code != 200:
+                content = await resp.aread()
+                raise BackendError(f"OpenAI API error {resp.status_code}: {content.decode()}")
+
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                data_str = line[6:]
+                if data_str.strip() == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+
+                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                if delta.get("content"):
+                    yield {"type": "text_delta", "content": delta["content"]}
+
+                for tc_delta in delta.get("tool_calls", []):
+                    idx = tc_delta.get("index", 0)
+                    if idx not in tool_calls_acc:
+                        tool_calls_acc[idx] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                    acc = tool_calls_acc[idx]
+                    if tc_delta.get("id"):
+                        acc["id"] = tc_delta["id"]
+                    fn = tc_delta.get("function", {})
+                    if fn.get("name"):
+                        acc["function"]["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        acc["function"]["arguments"] += fn["arguments"]
+
+        if tool_calls_acc:
+            yield {"type": "tool_calls", "tool_calls": list(tool_calls_acc.values())}
+        yield {"type": "done"}
 
     async def _jit_load(self) -> None:
         """Trigger JIT model load if a LocalBackendManager is wired in."""

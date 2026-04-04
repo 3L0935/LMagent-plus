@@ -39,7 +39,8 @@ import websockets
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Footer, Header, Input, RichLog, Static, TabbedContent, TabPane
+from textual.screen import ModalScreen
+from textual.widgets import Footer, Header, Input, ListView, ListItem, RichLog, Static, TabbedContent, TabPane
 
 from core.config import Config
 
@@ -195,6 +196,107 @@ async def _download_model_httpx(
 
 
 # ---------------------------------------------------------------------------
+# Persona picker — modal screen + custom header icon
+# ---------------------------------------------------------------------------
+
+_PICKER_CSS = """
+PersonaPickerScreen {
+    align: center middle;
+}
+#picker-box {
+    width: 64;
+    height: auto;
+    max-height: 35;
+    background: $surface;
+    border: double $primary;
+    padding: 1 2;
+}
+#picker-title {
+    text-align: center;
+    margin-bottom: 1;
+}
+#picker-list {
+    height: auto;
+    max-height: 22;
+    border: none;
+}
+#picker-list > ListItem {
+    padding: 0 1;
+    height: auto;
+}
+#picker-hint {
+    margin-top: 1;
+    color: $text-muted;
+    text-align: center;
+}
+"""
+
+
+class PersonaPickerScreen(ModalScreen):
+    """Persona / chat manager overlay.
+
+    Dismisses with:
+        ("open", persona_name)  — switch to / open that tab
+        ("new",  persona_name)  — clear that tab and open fresh
+        None                    — cancelled
+    """
+
+    CSS = _PICKER_CSS
+    BINDINGS = [
+        Binding("escape", "dismiss(None)", "Close", show=True),
+        Binding("n", "new_chat", "New chat", show=True),
+    ]
+
+    def __init__(
+        self,
+        personas_info: list[tuple[str, str, str]],
+        existing_tabs: set[str],
+        current_persona: str,
+    ) -> None:
+        self._personas_info = personas_info  # (name, description, model_label)
+        self._existing_tabs = existing_tabs
+        self._current_persona = current_persona
+        super().__init__()
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Vertical
+        with Vertical(id="picker-box"):
+            yield Static("[bold]Personas[/bold]", id="picker-title", markup=True)
+            with ListView(id="picker-list"):
+                for name, desc, model in self._personas_info:
+                    active = name == self._current_persona
+                    has_tab = name in self._existing_tabs
+                    active_tag = "  [yellow]◀ active[/yellow]" if active else ""
+                    tab_tag    = "  [dim](tab open)[/dim]" if has_tab and not active else ""
+                    yield ListItem(
+                        Static(
+                            f"[bold cyan]@{escape(name)}[/bold cyan]{active_tag}{tab_tag}\n"
+                            f"  [dim]{escape(desc)}[/dim]\n"
+                            f"  [dim]model: {escape(model)}[/dim]",
+                            markup=True,
+                        ),
+                        id=f"pick-{name}",
+                    )
+            yield Static(
+                "[dim]Enter = open tab   [bold]n[/bold] = new chat   Esc = close[/dim]",
+                id="picker-hint",
+                markup=True,
+            )
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        persona = (event.item.id or "").removeprefix("pick-")
+        if persona:
+            self.dismiss(("open", persona))
+
+    def action_new_chat(self) -> None:
+        lv = self.query_one("#picker-list", ListView)
+        item = lv.highlighted_child
+        persona = (item.id or "").removeprefix("pick-") if item else ""
+        if persona:
+            self.dismiss(("new", persona))
+
+
+# ---------------------------------------------------------------------------
 # Textual app
 # ---------------------------------------------------------------------------
 
@@ -203,9 +305,11 @@ class LMAgentTUI(App[None]):
 
     TITLE = "LMAgent-Plus"
     CSS = CSS
+    COMMAND_PALETTE_BINDING = ""  # désactivé — on rebind manuellement Ctrl+P
     BINDINGS = [
         Binding("escape", "cancel_response", "Cancel", show=True),
         Binding("ctrl+c", "quit", "Quit", show=True),
+        Binding("ctrl+p", "real_command_palette", "Commands", show=True),
         Binding("tab", "complete_next", "Complete", show=False, priority=True),
     ]
 
@@ -213,6 +317,14 @@ class LMAgentTUI(App[None]):
         self._config = config
         self._persona = "assistant"
         self._model_override: str | None = None
+        self._persona_models: dict[str, str] = {}  # per sub-agent model overrides
+        # Mid-stream persona setup state
+        self._stream_ws: Any = None          # active WebSocket during _run_chat
+        self._setup_active: bool = False          # True while waiting for user model choice
+        self._setup_persona: str = ""             # persona being configured
+        self._setup_model_list: list[str] = []    # numbered options shown to user
+        self._setup_assistant_model: str = ""     # "Enter = same as assistant"
+        self._setup_needs_download: set[str] = set()  # options that require download
         self._ws_task: asyncio.Task[None] | None = None
         self._streaming = False
         self._reload_confirm_pending = False
@@ -247,11 +359,18 @@ class LMAgentTUI(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        from textual.widgets._header import HeaderIcon
+        try:
+            self.query_one(HeaderIcon).tooltip = "Open persona picker"
+        except Exception:
+            pass
         state = self._load_ui_state()
         if "theme" in state:
             self.theme = state["theme"]
         elif "dark" in state:  # backwards compat with old cli_state.json
             self.theme = "textual-dark" if state["dark"] else "textual-light"
+        if "persona_models" in state:
+            self._persona_models = state["persona_models"]
         self._update_subtitle()
         self._write_system(
             f"Daemon: [cyan]ws://127.0.0.1:{self._config.daemon.port}[/cyan]  "
@@ -273,6 +392,11 @@ class LMAgentTUI(App[None]):
         # Wizard intercept before empty-text guard — Enter = accept default
         if self._wizard_active:
             await self._handle_wizard_input(text)
+            return
+
+        # Persona setup intercept — Enter = same as assistant
+        if self._setup_active:
+            asyncio.create_task(self._confirm_persona_model(text))
             return
 
         if not text:
@@ -373,16 +497,40 @@ class LMAgentTUI(App[None]):
             )
 
     async def _handle_model_cmd(self, args: list[str]) -> None:
-        """/model [id] — checks catalog, prompts download if not present."""
+        """/model [id] — set model for the active tab's persona.
+
+        In @assistant tab: sets global model override (may hot-reload daemon).
+        In any other tab (@coder, @writer, @research): saves a per-persona model
+        that is used whenever that sub-agent is called via call_agent.
+        """
+        active_persona = self._active_tab_persona()
+        is_sub_agent = active_persona != self._persona  # True when in a sub-agent tab
+
         if not args:
-            current = self._model_override or "(default from config)"
-            self._write_system(f"Current model override: [cyan]{current}[/cyan]")
+            if is_sub_agent:
+                current = self._persona_models.get(active_persona, "(default)")
+                self._write_system(
+                    f"Model for [green]@{active_persona}[/green]: [cyan]{current}[/cyan]\n"
+                    "[dim]Use /model <id> to set a dedicated model for this persona.[/dim]"
+                )
+            else:
+                current = self._model_override or "(default from config)"
+                self._write_system(f"Current model override: [cyan]{current}[/cyan]")
             return
 
         model_id = args[0]
 
+        if is_sub_agent:
+            # Per-persona model — no daemon reload needed, just save and inform
+            self._save_persona_model(active_persona, model_id)
+            self._write_system(
+                f"Model for [green]@{active_persona}[/green] set to [cyan]{escape(model_id)}[/cyan]\n"
+                "[dim]Saved — will be used on next call to this persona.[/dim]"
+            )
+            return
+
+        # @assistant tab — global override, may trigger daemon reload for local routing.
         # Always check the local catalog first, regardless of current routing.
-        # If the model is a known local model, handle download / hot-reload.
         try:
             from core.runtime.model_manager import _load_catalog, list_downloaded_models
             catalog   = {m["id"]: m for m in _load_catalog()}
@@ -1027,6 +1175,138 @@ class LMAgentTUI(App[None]):
         state["theme"] = theme
         self._save_ui_state(state)
 
+    def _save_persona_model(self, persona: str, model_id: str) -> None:
+        """Persist a per-persona model override to cli_state.json."""
+        self._persona_models[persona] = model_id
+        state = self._load_ui_state()
+        state["persona_models"] = self._persona_models
+        self._save_ui_state(state)
+
+    # ── Mid-stream persona model setup ────────────────────────────────────────
+
+    async def _handle_persona_setup_event(self, evt: dict, ws: Any) -> None:
+        """Handle persona_setup_required — show mini-wizard, block input until done."""
+        persona      = evt.get("persona", "?")
+        default_loc  = evt.get("default_model", "")
+        cloud_equiv  = evt.get("cloud_equivalent", "")
+        assistant_model = self._model_override or _active_model(self._config)
+
+        self._setup_persona        = persona
+        self._setup_assistant_model = assistant_model
+        self._stream_ws            = ws
+
+        # Build numbered model list
+        options: list[str] = []
+        # Track which options need a download
+        _needs_download: set[str] = set()
+        try:
+            from core.runtime.model_manager import list_downloaded_models
+            downloaded_ids = {m["id"] for m in list_downloaded_models()}
+        except Exception:
+            downloaded_ids = set()
+
+        # Recommended local model always first (downloaded or not)
+        if default_loc:
+            options.append(default_loc)
+            if default_loc not in downloaded_ids:
+                _needs_download.add(default_loc)
+        # Other downloaded models
+        for m in sorted(downloaded_ids):
+            if m not in options:
+                options.append(m)
+        # Cloud fallback
+        if cloud_equiv and cloud_equiv not in options:
+            options.append(cloud_equiv)
+
+        self._setup_model_list    = options
+        self._setup_needs_download = _needs_download
+        self._setup_active        = True
+
+        # Display the mini-wizard
+        lines = [
+            f"\n[bold cyan]Model setup — @{escape(persona)}[/bold cyan]",
+            f"  First call to this persona — choose a model to use.",
+            "",
+            f"  [yellow]Enter[/yellow]  same as @assistant  "
+            f"([cyan]{escape(assistant_model)}[/cyan])",
+        ]
+        for i, m in enumerate(options, 1):
+            if m == default_loc:
+                if m in _needs_download:
+                    tag = " [yellow]← recommended  ⬇ download needed[/yellow]"
+                else:
+                    tag = " [dim]← recommended[/dim]"
+            elif m in _needs_download:
+                tag = " [yellow]⬇ download needed[/yellow]"
+            else:
+                tag = ""
+            lines.append(f"  [bold]{i}[/bold]  [cyan]{escape(m)}[/cyan]{tag}")
+        lines.append("")
+        lines.append(
+            "  [dim]Type a number or Enter — choice is saved; download starts if needed[/dim]"
+        )
+        self._write_system("\n".join(lines))
+
+    async def _confirm_persona_model(self, text: str) -> None:
+        """Resolve user's model choice and send persona.model.confirm to daemon."""
+        persona         = self._setup_persona
+        options         = self._setup_model_list
+        needs_download  = self._setup_needs_download
+        assistant_model = self._setup_assistant_model
+        ws              = self._stream_ws
+
+        self._setup_active = False
+
+        # Resolve choice
+        model_id: str
+        raw = text.strip()
+        if not raw:
+            model_id = assistant_model
+        else:
+            try:
+                idx = int(raw) - 1
+                if 0 <= idx < len(options):
+                    model_id = options[idx]
+                else:
+                    self._write_system(
+                        f"[red]No option #{raw}[/red] — using @assistant model."
+                    )
+                    model_id = assistant_model
+            except ValueError:
+                model_id = raw
+
+        # If model needs download, trigger it before confirming
+        if model_id in needs_download:
+            self._write_system(
+                f"[yellow]Downloading [cyan]{escape(model_id)}[/cyan] for @{escape(persona)}…[/yellow]"
+            )
+            try:
+                await self._send_model_reload(model_id)
+                self._write_system(f"[green]Download complete.[/green]")
+            except Exception as exc:
+                self._write_error(
+                    f"Download failed: {escape(str(exc))} — falling back to @assistant model."
+                )
+                model_id = assistant_model
+
+        # Persist the choice
+        self._save_persona_model(persona, model_id)
+        self._write_system(
+            f"[green]@{escape(persona)}[/green] → [cyan]{escape(model_id)}[/cyan]  [dim](saved)[/dim]"
+        )
+
+        # Send confirmation to daemon so the blocked call_agent can continue
+        if ws is not None:
+            try:
+                await ws.send(json.dumps({
+                    "jsonrpc": "2.0",
+                    "method": "persona.model.confirm",
+                    "params": {"persona": persona, "model_id": model_id},
+                    "id": str(uuid.uuid4()),
+                }))
+            except Exception as exc:
+                self._write_error(f"Could not confirm model: {escape(str(exc))}")
+
     # ── Slash command autocomplete ─────────────────────────────────────────────
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -1136,7 +1416,12 @@ class LMAgentTUI(App[None]):
         uri = f"ws://127.0.0.1:{self._config.daemon.port}"
         try:
             async with websockets.connect(uri, open_timeout=5) as ws:
-                params: dict = {"message": message, "agent_id": self._persona}
+                self._stream_ws = ws          # expose for mid-stream sends
+                params: dict = {
+                    "message": message,
+                    "agent_id": self._persona,
+                    "persona_models": self._persona_models,
+                }
                 if self._model_override:
                     params["model_id"] = self._model_override
                 payload = json.dumps({
@@ -1223,20 +1508,23 @@ class LMAgentTUI(App[None]):
                             # Multi-agent: write sub-agent output to its tab
                             if tool_name == "call_agent" and isinstance(output, dict):
                                 sub        = output.get("agent") or _last_sub_agent or ""
-                                agent_out  = output.get("output", "")
-                                errors     = output.get("errors", [])
+                                agent_out  = output.get("output") or ""
+                                errors     = output.get("errors") or []
                                 if sub:
                                     log = self._chat(sub)
                                     if agent_out:
                                         log.write(
                                             f"[bold green]@{sub}[/bold green]: "
-                                            f"{escape(agent_out)}"
+                                            f"{escape(str(agent_out))}"
                                         )
-                                    for err in errors:
-                                        log.write(f"[bold red]✗[/bold red] {escape(err)}")
+                                    for err in (errors if isinstance(errors, list) else []):
+                                        log.write(f"[bold red]✗[/bold red] {escape(str(err))}")
                                 # Return focus to main agent tab
                                 self._switch_to_agent_tab(self._persona)
                                 _last_sub_agent = None
+
+                        elif etype == "persona_setup_required":
+                            await self._handle_persona_setup_event(evt, ws)
 
                         elif etype == "error":
                             self._write_error(evt.get("message", "unknown error"))
@@ -1263,6 +1551,8 @@ class LMAgentTUI(App[None]):
         except Exception as exc:
             self._write_error(f"{escape(str(exc))}")
         finally:
+            self._stream_ws = None
+            self._setup_active = False
             self._streaming = False
             self._update_subtitle()
 
@@ -1298,6 +1588,23 @@ class LMAgentTUI(App[None]):
             except Exception:
                 return self.query_one(RichLog)
 
+    def _active_chat(self) -> RichLog:
+        """Return the RichLog of the currently visible tab (for local/system output)."""
+        try:
+            active_id = self.query_one("#agent-tabs", TabbedContent).active
+            agent_name = active_id.removeprefix("tab-")
+            return self.query_one(f"#chat-{agent_name}", RichLog)
+        except Exception:
+            return self._chat()
+
+    def _active_tab_persona(self) -> str:
+        """Return the persona name of the currently active tab."""
+        try:
+            active_id = self.query_one("#agent-tabs", TabbedContent).active
+            return active_id.removeprefix("tab-")
+        except Exception:
+            return self._persona
+
     def _write_user(self, text: str) -> None:
         self._chat().write(f"\n[bold blue]You[/bold blue]: {escape(text)}")
 
@@ -1317,19 +1624,28 @@ class LMAgentTUI(App[None]):
 
     def _write_tool_result(self, name: str, output: dict) -> None:
         body  = format_tool_result(name, output)
-        color = "red" if "error" in body and not body.startswith("stdout") else "dim"
+        # Detect actual errors: output dict has a non-empty "error" key, or body starts with "error:"
+        has_error = (
+            (isinstance(output, dict) and output.get("error"))
+            or body.startswith("error:")
+        )
+        color = "red" if has_error else "dim"
         self._chat().write(
             f"  [{color}]◀ result [bold]{escape(name)}[/bold]: {escape(body)}[/{color}]"
         )
 
     def _write_error(self, msg: str) -> None:
-        self._chat().write(f"[bold red]✗[/bold red] {msg}")
+        self._active_chat().write(f"[bold red]✗[/bold red] {msg}")
 
     def _write_system(self, msg: str) -> None:
-        self._chat().write(f"[dim]{msg}[/dim]")
+        self._active_chat().write(f"[dim]{msg}[/dim]")
 
     def _update_subtitle(self, status: str = "idle") -> None:
-        model = self._model_override or _active_model(self._config)
+        active = self._active_tab_persona()
+        if active != self._persona and active in self._persona_models:
+            model = self._persona_models[active]
+        else:
+            model = self._model_override or _active_model(self._config)
         self.sub_title = f"@{self._persona} | {model} | {status}"
 
     # ── Info commands ──────────────────────────────────────────────────────────
@@ -1429,4 +1745,68 @@ class LMAgentTUI(App[None]):
             f"Daemon:  ws://127.0.0.1:{self._config.daemon.port}\n"
             f"  Agent:   @{self._persona}\n"
             f"  State:   {state}"
+        )
+
+    # ── Persona picker ────────────────────────────────────────────────────────
+
+    def action_command_palette(self) -> None:
+        """Icône header ⭘ → persona picker (remplace la command palette Textual)."""
+        self._open_persona_picker()
+
+    def action_real_command_palette(self) -> None:
+        """Ctrl+P → vraie command palette Textual."""
+        from textual.command import CommandPalette
+        if not CommandPalette.is_open(self):
+            self.push_screen(CommandPalette())
+
+    def action_open_persona_picker(self) -> None:
+        """Open the persona / chat manager overlay."""
+        self._open_persona_picker()
+
+    def _open_persona_picker(self) -> None:
+        from core.persona_loader import load_persona as _lp, list_personas as _lps
+
+        personas_info: list[tuple[str, str, str]] = []
+        for name in sorted(_lps()):
+            try:
+                p = _lp(name)
+                desc = p.get("description", "")
+                if name == self._persona:
+                    model = self._model_override or _active_model(self._config)
+                elif name in self._persona_models:
+                    model = self._persona_models[name]
+                else:
+                    model = (
+                        p.get("cloud_equivalent")
+                        or p.get("default_model")
+                        or "default"
+                    )
+            except Exception:
+                desc, model = "", "default"
+            personas_info.append((name, desc, model))
+
+        # Current persona first, then alphabetical
+        personas_info.sort(key=lambda x: (0 if x[0] == self._persona else 1, x[0]))
+
+        existing_tabs: set[str] = {
+            tp.id.removeprefix("tab-")
+            for tp in self.query("TabPane")
+            if tp.id
+        }
+
+        def _handle(result: tuple[str, str] | None) -> None:
+            if result is None:
+                return
+            action, persona = result
+            self._ensure_agent_tab(persona)
+            self._switch_to_agent_tab(persona)
+            if action == "new":
+                self._chat(persona).clear()
+                self._write_system(
+                    f"[dim]New conversation — @{persona}[/dim]"
+                )
+
+        self.push_screen(
+            PersonaPickerScreen(personas_info, existing_tabs, self._persona),
+            _handle,
         )

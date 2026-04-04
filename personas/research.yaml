@@ -27,6 +27,8 @@ tone: "Precise. Use headers and bullet points. Cite sources when possible."
 tools_enabled:
   - name: file_ops
     when_to_use: "To read source documents before analyzing them — always read before reasoning"
+  - name: call_agent
+    when_to_use: "When the task exceeds available tools — escalate to @assistant only"
 
 tools_optional:
   # v0.2: {name: web_search, when_to_use: "To fetch live data not present in local files"}

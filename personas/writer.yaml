@@ -26,6 +26,8 @@ tone: "Clear and natural. Adapt to the user's register."
 tools_enabled:
   - name: file_ops
     when_to_use: "For reading source material and writing output — only tool available"
+  - name: call_agent
+    when_to_use: "When the task exceeds available tools — escalate to @assistant only"
 
 tools_optional: []
 

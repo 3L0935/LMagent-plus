@@ -21,6 +21,7 @@ class ChatParams(BaseModel):
     message: str
     agent_id: str | None = None
     model_id: str | None = None
+    persona_models: dict[str, str] = {}
 
 
 class ChatRequest(BaseModel):

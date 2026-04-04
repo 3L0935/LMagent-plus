@@ -9,7 +9,6 @@ import pytest
 from core.errors import ToolError
 from core.tool_registry import ToolDefinition, ToolRegistry
 from core.tools.call_agent import (
-    CALL_AGENT_SCHEMA,
     _format_task_message,
     make_call_agent_tool,
 )
@@ -65,11 +64,22 @@ class TestMakeCallAgentTool:
         assert isinstance(tool, ToolDefinition)
         assert tool.name == "call_agent"
 
-    def test_schema_is_call_agent_schema(self):
+    def test_schema_has_required_name_and_payload(self):
         router = MagicMock()
         registry = ToolRegistry()
         tool = make_call_agent_tool(router, registry)
-        assert tool.input_schema == CALL_AGENT_SCHEMA
+        assert "name" in tool.input_schema["properties"]
+        assert "payload" in tool.input_schema["properties"]
+        assert set(tool.input_schema["required"]) == {"name", "payload"}
+
+    def test_allowed_targets_controls_enum(self):
+        tool_default = make_call_agent_tool(MagicMock(), ToolRegistry())
+        assert tool_default.input_schema["properties"]["name"]["enum"] == ["coder", "writer", "research"]
+
+        tool_restricted = make_call_agent_tool(
+            MagicMock(), ToolRegistry(), allowed_targets=["assistant"]
+        )
+        assert tool_restricted.input_schema["properties"]["name"]["enum"] == ["assistant"]
 
     def test_when_to_use_is_set(self):
         tool = make_call_agent_tool(MagicMock(), ToolRegistry())

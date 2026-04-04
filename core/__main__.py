@@ -15,7 +15,7 @@ from core.tools.git import GIT_CLONE_TOOL, GIT_STATUS_TOOL, GIT_LOG_TOOL
 from core.tools.call_agent import make_call_agent_tool
 from core.tools.memory_ops import make_update_memory_tool
 from core.app_prompt import make_app_system_hook
-from core.router import AgentRouter, Router
+from core.router import Router
 from core.agent import Agent
 from core.daemon import run_daemon
 
@@ -42,6 +42,13 @@ def _build_agents(config, store: PARAStore, router: Router) -> dict[str, Agent]:
 
     app_hook    = make_app_system_hook()
     global_hook = store.make_global_memory_hook()
+
+    # Full base registry forwarded to call_agent handlers so sub-agents
+    # can access all tools regardless of which persona is calling.
+    full_base_registry = ToolRegistry()
+    for tool in base_tools.values():
+        full_base_registry.register(tool)
+
     agents: dict[str, Agent] = {}
 
     for persona_name in list_personas():
@@ -50,14 +57,27 @@ def _build_agents(config, store: PARAStore, router: Router) -> dict[str, Agent]:
             store.ensure_structure(persona_name)
 
             enabled_names = set(resolve_tool_names(persona["tools_enabled"]))
+            optional_names = set(resolve_tool_names(persona.get("tools_optional") or []))
             registry = ToolRegistry()
 
             for name, tool in base_tools.items():
-                if name in enabled_names:
+                if name in enabled_names or name in optional_names:
                     registry.register(tool)
 
             if "call_agent" in enabled_names:
-                registry.register(make_call_agent_tool(AgentRouter(), registry))
+                # @assistant orchestrates specialists; specialists escalate to @assistant.
+                if persona_name == "assistant":
+                    call_agent_targets = ["coder", "writer", "research"]
+                else:
+                    call_agent_targets = ["assistant"]
+                registry.register(make_call_agent_tool(
+                    router,
+                    full_base_registry,
+                    store=store,
+                    app_hook=app_hook,
+                    allowed_targets=call_agent_targets,
+                    caller_name=persona_name,
+                ))
 
             # update_memory: always available (system tool, not listed in tools_enabled)
             registry.register(make_update_memory_tool(persona_name, MEMORY_DIR))
@@ -69,6 +89,7 @@ def _build_agents(config, store: PARAStore, router: Router) -> dict[str, Agent]:
                 router=router,
                 tool_registry=registry,
                 system_prompt_hooks=[app_hook, global_hook, persona_hook],
+                cloud_equivalent=persona.get("cloud_equivalent"),
             )
             logging.getLogger(__name__).debug("Loaded persona: %s", persona_name)
         except Exception as exc:
@@ -91,6 +112,19 @@ def main() -> None:
     load_dotenv()
     config = load_config()
     _setup_logging(config.daemon.log_level)
+
+    _log = logging.getLogger(__name__)
+
+    if config.memory.semantic_search:
+        _log.warning(
+            "config.memory.semantic_search is True but has no effect in v0.1 — "
+            "semantic index is deferred to v0.2."
+        )
+    if config.daemon.web_enabled:
+        _log.warning(
+            "config.daemon.web_enabled is True but has no effect in v0.1 — "
+            "web interface is deferred to v0.2."
+        )
 
     from core.runtime.llama_manager import LocalBackendManager
     local_manager = LocalBackendManager(config)

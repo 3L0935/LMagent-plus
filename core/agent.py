@@ -35,6 +35,7 @@ class Agent:
         tool_registry: ToolRegistry,
         system_prompt_hooks: list[Callable[[], str]] | None = None,
         max_iterations: int = MAX_ITERATIONS,
+        cloud_equivalent: str | None = None,
     ) -> None:
         """
         Args:
@@ -43,19 +44,25 @@ class Agent:
             system_prompt_hooks: Callables that return system prompt fragments.
                 Joined with double newlines. Register persona/memory hooks here.
             max_iterations: Hard limit on tool-call loops per request.
+            cloud_equivalent: Persona-preferred cloud model (e.g. "claude-sonnet-4-6").
+                Used as model default when no explicit override is provided via run().
         """
         self._router = router
         self._registry = tool_registry
         self._hooks: list[Callable[[], str]] = system_prompt_hooks or []
         self._max_iterations = max_iterations
+        self._cloud_equivalent = cloud_equivalent
 
     def _build_system_prompt(self) -> str:
         fragments = [hook() for hook in self._hooks]
-        # Always append the tools list as the final fragment
         tools = self._registry.list_tools()
         if tools:
-            tool_lines = "\n".join(f"- {t.name}: {t.description}" for t in tools)
-            fragments.append(f"You have access to the following tools:\n{tool_lines}")
+            # Only append the fallback tool list if no hook has already injected one
+            # via {tools_list} substitution (which includes when_to_use hints).
+            joined = "\n\n".join(f for f in fragments if f)
+            if not any(f"- {t.name}:" in joined for t in tools):
+                tool_lines = "\n".join(f"- {t.name}: {t.description}" for t in tools)
+                fragments.append(f"You have access to the following tools:\n{tool_lines}")
         return "\n\n".join(f for f in fragments if f)
 
     async def run(self, user_message: str, model: str | None = None) -> AsyncGenerator[dict, None]:
@@ -72,6 +79,9 @@ class Agent:
           {"type": "error",       "message": str}
           {"type": "done"}
         """
+        # Persona-preferred model takes effect when no explicit override is requested.
+        effective_model = model or self._cloud_equivalent
+
         system_prompt = self._build_system_prompt()
         messages: list[dict] = []
         if system_prompt:
@@ -91,7 +101,7 @@ class Agent:
                 async for chunk in self._router.chat_completion_stream(
                     messages=messages,
                     tools=tools_api or None,
-                    model=model,
+                    model=effective_model,
                 ):
                     if chunk["type"] == "text_delta":
                         text_parts.append(chunk["content"])
@@ -112,7 +122,7 @@ class Agent:
                     response = await self._router.chat_completion(
                         messages=messages,
                         tools=tools_api or None,
-                        model=model,
+                        model=effective_model,
                     )
                     choice = response.get("choices", [{}])[0]
                     msg = choice.get("message", {})

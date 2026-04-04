@@ -471,7 +471,7 @@ class Router:
         )
         if resp.status_code != 200:
             raise BackendError(f"OpenAI API error {resp.status_code}: {resp.text}")
-            return resp.json()
+        return resp.json()
 
 
 # ---------------------------------------------------------------------------

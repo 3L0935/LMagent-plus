@@ -1,24 +1,19 @@
 """
 call_agent tool — delegate a task to a specialized sub-agent.
 
-This tool is intended for the @assistant orchestrator persona.
-It loads the target persona, builds a scoped tool registry and system prompt,
-runs the sub-agent loop, and returns the aggregated result.
+Bidirectional routing model:
+  @assistant  →  coder | writer | research   (orchestrator, allowed_targets=["coder","writer","research"])
+  coder|writer|research  →  assistant        (escalation only, allowed_targets=["assistant"])
 
-Usage by the LLM:
-    call_agent(name="coder", payload={"task": "fix bug in auth.py", "files": ["auth.py"]})
-
-Design notes:
-- The handler is not a module-level constant — it captures router and base_registry
-  at setup time via make_call_agent_tool().
-- The target agent name is constrained to known personas (no self-routing to "assistant").
-- Payload is a structured JSON object, not free text, to avoid context loss across hops.
+allowed_targets controls both the JSON schema enum and the anti-loop guard.
+Sub-agents receive global + per-agent memory hooks for full context continuity.
 """
 
 from __future__ import annotations
 
-import json
+from typing import Callable
 
+from core.context_vars import persona_models_ctx, persona_setup_fn_ctx
 from core.errors import ConfigError, ToolError
 from core.persona_loader import load_persona, make_system_prompt_hook, resolve_tool_names
 from core.tool_registry import ToolDefinition, ToolRegistry
@@ -28,47 +23,7 @@ if True:
     if TYPE_CHECKING:
         from core.agent import Agent
         from core.router import Router
-
-
-# JSON Schema for the call_agent input
-CALL_AGENT_SCHEMA: dict = {
-    "type": "object",
-    "properties": {
-        "name": {
-            "type": "string",
-            "description": "Target agent name: coder, writer, or research",
-            "enum": ["coder", "writer", "research"],
-        },
-        "payload": {
-            "type": "object",
-            "description": "Structured task payload passed to the target agent",
-            "properties": {
-                "task": {
-                    "type": "string",
-                    "description": "The task to perform — be specific and actionable",
-                },
-                "files": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Relevant file paths the agent should focus on",
-                },
-                "constraints": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Constraints the agent must respect (e.g. 'do not change the API')",
-                },
-                "context": {
-                    "type": "string",
-                    "description": "Additional context to help the agent understand the task",
-                },
-            },
-            "required": ["task"],
-            "additionalProperties": False,
-        },
-    },
-    "required": ["name", "payload"],
-    "additionalProperties": False,
-}
+        from core.memory import PARAStore
 
 
 def _format_task_message(payload: dict) -> str:
@@ -87,23 +42,78 @@ def _format_task_message(payload: dict) -> str:
 def make_call_agent_tool(
     router: "Router",
     base_registry: ToolRegistry,
+    store: "PARAStore | None" = None,
+    app_hook: "Callable[[], str] | None" = None,
+    allowed_targets: list[str] | None = None,
+    caller_name: str | None = None,
 ) -> ToolDefinition:
     """
-    Create and return a call_agent ToolDefinition bound to the given router and registry.
+    Create and return a call_agent ToolDefinition.
 
     Args:
-        router: The LLM backend router used by sub-agents.
-        base_registry: The full tool registry — sub-agents receive a filtered subset.
-
-    Returns:
-        A ToolDefinition for 'call_agent' ready to register.
+        router: LLM backend router used by sub-agents.
+        base_registry: Full tool registry — sub-agents receive a filtered subset.
+        store: PARAStore for injecting global + per-agent memory into sub-agents.
+        app_hook: App-level system prompt hook (forwarded to sub-agents).
+        allowed_targets: Constrains the 'name' enum in the JSON schema.
+            @assistant gets ["coder", "writer", "research"].
+            Specialists get ["assistant"].
+        caller_name: Name of the calling persona — used to block self-delegation.
     """
-    # Import here to avoid circular imports at module level
     from core.agent import Agent
+
+    targets = allowed_targets or ["coder", "writer", "research"]
+    target_desc = ", ".join(targets)
+    is_escalation = targets == ["assistant"]
+
+    schema: dict = {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": f"Target agent name: {target_desc}",
+                "enum": targets,
+            },
+            "payload": {
+                "type": "object",
+                "description": "Structured task payload passed to the target agent",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The task to perform — be specific and actionable",
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Relevant file paths the agent should focus on",
+                    },
+                    "constraints": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Constraints the agent must respect (e.g. 'do not change the API')",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Additional context to help the agent understand the task",
+                    },
+                },
+                "required": ["task"],
+                "additionalProperties": False,
+            },
+        },
+        "required": ["name", "payload"],
+        "additionalProperties": False,
+    }
 
     async def _handler(params: dict) -> dict:
         agent_name: str = params["name"]
         payload: dict = params["payload"]
+
+        # Anti-loop guard: prevent self-delegation even if schema enum allows it.
+        if caller_name and agent_name == caller_name:
+            raise ToolError(
+                f"Self-routing blocked: '{agent_name}' cannot delegate to itself via call_agent."
+            )
 
         # Load target persona
         try:
@@ -118,14 +128,37 @@ def make_call_agent_tool(
             if tool is not None:
                 sub_registry.register(tool)
 
-        # Build the persona system prompt hook
-        hook = make_system_prompt_hook(persona, sub_registry)
+        # Build system prompt hooks — forward app hook + global memory + per-agent memory
+        hooks: list[Callable[[], str]] = []
+        if app_hook:
+            hooks.append(app_hook)
+        if store:
+            hooks.append(store.make_global_memory_hook())
+        memory_fn = store.make_agent_memory_hook(agent_name) if store else None
+        hooks.append(make_system_prompt_hook(persona, sub_registry, memory_fn=memory_fn))
+
+        # Resolve model: per-persona override from CLI, else ask user (first call),
+        # else fall back to persona's cloud_equivalent.
+        persona_models = persona_models_ctx.get({})
+        if agent_name in persona_models:
+            sub_model: str | None = persona_models[agent_name]
+        else:
+            setup_fn = persona_setup_fn_ctx.get(None)
+            if setup_fn is not None:
+                chosen = await setup_fn(agent_name)
+                sub_model = chosen or persona.get("cloud_equivalent")
+                # Propagate the choice so subsequent calls in this request use it
+                if chosen:
+                    persona_models_ctx.set({**persona_models, agent_name: chosen})
+            else:
+                sub_model = persona.get("cloud_equivalent")
 
         # Run the sub-agent
         agent = Agent(
             router=router,
             tool_registry=sub_registry,
-            system_prompt_hooks=[hook],
+            system_prompt_hooks=hooks,
+            cloud_equivalent=persona.get("cloud_equivalent"),
         )
         task_message = _format_task_message(payload)
 
@@ -133,8 +166,8 @@ def make_call_agent_tool(
         tool_results: list[dict] = []
         errors: list[str] = []
 
-        async for event in agent.run(task_message):
-            if event["type"] == "text":
+        async for event in agent.run(task_message, model=sub_model):
+            if event["type"] in ("text", "text_delta"):
                 text_parts.append(event["content"])
             elif event["type"] == "tool_result":
                 tool_results.append({"tool": event["name"], "output": event["output"]})
@@ -143,21 +176,28 @@ def make_call_agent_tool(
 
         return {
             "agent": agent_name,
-            "output": "\n".join(text_parts),
+            "output": "".join(text_parts),
             "tool_results": tool_results,
             "errors": errors,
         }
 
-    return ToolDefinition(
-        name="call_agent",
-        description=(
+    if is_escalation:
+        description = "Escalate to @assistant when the task exceeds your available tools."
+        when_to_use = "When the task exceeds available tools — escalate to @assistant only"
+    else:
+        description = (
             "Delegate a task to a specialized sub-agent (coder, writer, or research). "
             "The task payload must be a structured JSON object."
-        ),
-        input_schema=CALL_AGENT_SCHEMA,
-        handler=_handler,
-        when_to_use=(
+        )
+        when_to_use = (
             "When the task clearly belongs to a specialized domain — "
             "prefer this over handling everything yourself"
-        ),
+        )
+
+    return ToolDefinition(
+        name="call_agent",
+        description=description,
+        input_schema=schema,
+        handler=_handler,
+        when_to_use=when_to_use,
     )

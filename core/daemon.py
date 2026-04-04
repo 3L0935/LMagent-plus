@@ -13,6 +13,7 @@ import websockets
 from websockets.server import ServerConnection
 
 from core.config import Config
+from core.context_vars import persona_models_ctx, persona_setup_fn_ctx
 from core.ipc_protocol import (
     ChatEvent,
     RPCResponse,
@@ -61,18 +62,41 @@ async def run_daemon(
     async def _handle_connection(websocket: ServerConnection) -> None:
         client = websocket.remote_address
         logger.info("Client connected: %s", client)
+
+        # Inbox queue enables mid-stream bidirectional communication:
+        # a reader task feeds all incoming messages here, while the chat
+        # handler can also consume messages (e.g. persona.model.confirm).
+        inbox: asyncio.Queue[str | None] = asyncio.Queue()
+
+        async def _reader() -> None:
+            try:
+                async for raw_message in websocket:
+                    await inbox.put(str(raw_message))
+            except websockets.exceptions.ConnectionClosedOK:
+                pass
+            except websockets.exceptions.ConnectionClosedError as e:
+                logger.warning("Connection closed with error: %s", e)
+            finally:
+                await inbox.put(None)  # sentinel — outer loop stops
+
+        reader_task = asyncio.create_task(_reader())
         try:
-            async for raw_message in websocket:
-                logger.debug("Received: %s", raw_message)
-                await _dispatch(websocket, str(raw_message))
-        except websockets.exceptions.ConnectionClosedOK:
-            pass
-        except websockets.exceptions.ConnectionClosedError as e:
-            logger.warning("Connection closed with error: %s", e)
+            while True:
+                raw = await inbox.get()
+                if raw is None:
+                    break  # connection closed
+                logger.debug("Received: %s", raw)
+                await _dispatch(websocket, raw, inbox)
         finally:
+            reader_task.cancel()
+            await asyncio.gather(reader_task, return_exceptions=True)
             logger.info("Client disconnected: %s", client)
 
-    async def _dispatch(websocket: ServerConnection, raw: str) -> None:
+    async def _dispatch(
+        websocket: ServerConnection,
+        raw: str,
+        inbox: "asyncio.Queue[str | None]",
+    ) -> None:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -138,20 +162,82 @@ async def run_daemon(
                     ChatEvent(params={"type": "model_ready", "message": f"{model_name} loaded"}).model_dump_json()
                 )
 
+            # Thread per-persona model overrides into tool handlers via contextvar
+            persona_models_ctx.set(request.params.persona_models)
+
+            # Mid-stream model-selection: futures resolved when client sends
+            # persona.model.confirm; shared with the side-channel task below.
+            _setup_futures: dict[str, "asyncio.Future[str | None]"] = {}
+
+            async def _setup_fn(persona_name: str) -> "str | None":
+                """Emit persona_setup_required and wait for client to confirm."""
+                from core.persona_loader import load_persona as _lp
+                try:
+                    _p = _lp(persona_name)
+                    _default = _p.get("default_model") or ""
+                    _cloud    = _p.get("cloud_equivalent") or ""
+                except Exception:
+                    _default = _cloud = ""
+
+                fut: "asyncio.Future[str | None]" = asyncio.get_event_loop().create_future()
+                _setup_futures[persona_name] = fut
+                await websocket.send(ChatEvent(params={
+                    "type": "persona_setup_required",
+                    "persona": persona_name,
+                    "default_model": _default,
+                    "cloud_equivalent": _cloud,
+                }).model_dump_json())
+                try:
+                    return await asyncio.wait_for(asyncio.shield(fut), timeout=120.0)
+                except asyncio.TimeoutError:
+                    logger.warning("persona_setup timeout for %s — using default", persona_name)
+                    _setup_futures.pop(persona_name, None)
+                    return None
+
+            persona_setup_fn_ctx.set(_setup_fn)
+
+            async def _side_channel() -> None:
+                """Consume persona.model.confirm messages from inbox mid-stream."""
+                while True:
+                    raw_mid = await inbox.get()
+                    if raw_mid is None:
+                        # Connection closed — put sentinel back for outer loop
+                        await inbox.put(None)
+                        return
+                    try:
+                        msg = json.loads(raw_mid)
+                    except json.JSONDecodeError:
+                        continue
+                    if msg.get("method") == "persona.model.confirm":
+                        params  = msg.get("params", {})
+                        persona = params.get("persona", "")
+                        model   = params.get("model_id") or None
+                        fut     = _setup_futures.pop(persona, None)
+                        if fut and not fut.done():
+                            fut.set_result(model)
+                    # Discard any other mid-stream messages (polling etc.)
+
             text_parts: list[str] = []
+            side_task = asyncio.create_task(_side_channel())
             try:
                 async for event in agent.run(request.params.message, model=request.params.model_id):
                     chat_event = ChatEvent(params=event)
                     await websocket.send(chat_event.model_dump_json())
-                    if event.get("type") == "text":
+                    if event.get("type") in ("text", "text_delta"):
                         text_parts.append(event["content"])
             except Exception as exc:
                 logger.exception("Agent error: %s", exc)
                 err = RPCResponse.err(request.id, INTERNAL_ERROR, f"Agent error: {exc}")
                 await websocket.send(err.model_dump_json())
                 return
+            finally:
+                side_task.cancel()
+                await asyncio.gather(side_task, return_exceptions=True)
 
-            _archive_session(config, store, resolved_id, request.params.message, text_parts)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None, _archive_session, config, store, resolved_id, request.params.message, text_parts
+            )
             await websocket.send(RPCResponse.ok(request.id, {"status": "complete"}).model_dump_json())
             return
 

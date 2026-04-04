@@ -185,6 +185,73 @@ Scope: no new features — only fixes, hardening, and missing quality-of-life im
 
 ---
 
+### Phase 5.5 — Pre-release hardening `[x]`
+
+**Goal:** Fix all bugs and architectural inconsistencies identified by code audit before v0.2 scope opens.
+
+**P0 — Critical bugs**
+
+- [ ] BUG-1 · `_openai_completion` returns `None` on success — `return resp.json()` is dead code (placed after the `raise`); non-streaming fallback in `agent.py` crashes with `AttributeError: 'NoneType'`. Fix: move `return resp.json()` outside the `if resp.status_code != 200` block.
+- [ ] BUG-2 · `ensure_loaded`: `log` not defined → `NameError` on first launch — `log.info(...)` called before `log` is assigned in scope; if `llama-server` binary is missing, crashes before download. Fix: add `log = logging.getLogger(__name__)` as module-level logger.
+- [ ] BUG-3 · Session archive empty in streaming mode — `_archive_session` only collects `type == "text"` events; streaming emits `text_delta`. All sessions archived with empty summary. Fix: capture `text_delta` events in `text_parts` as well.
+
+**P1 — Architectural bugs**
+
+- [ ] BUG-4 · Double tool list in system prompt — `_build_system_prompt()` appends its own tool list (without `when_to_use` hints) on top of the `{tools_list}` fragment already injected by the persona hook (with hints). Local models see tools listed twice. Fix: suppress the automatic list when any hook has already produced `{tools_list}`.
+- [ ] BUG-5 · Sub-agents from `call_agent` have no memory hooks — `Agent` instantiated in `call_agent.py` receives neither `global_memory_hook` nor `agent_memory_hook`. Global preferences and persona memory are invisible to sub-agents. Fix: `make_call_agent_tool` must accept a `PARAStore` (or pre-built hooks) and forward them to the sub-agent.
+- [ ] SMELL-2 · `call_agent` receives `AgentRouter()` instead of LLM Router — `__main__.py` line 60 passes `AgentRouter()` (keyword heuristic) where an LLM Router is expected; `AgentRouter` is silently ignored inside the tool. Fix: pass the LLM router. Corrected in `__main__.py` call site. (Absorbed by ARCH-3.)
+- [ ] ARCH-1 · `call_agent` schema: restricted variant for specialized personas — currently `enum: ["coder", "writer", "research"]` only usable by `@assistant`. Fix: `make_call_agent_tool` accepts `allowed_targets: list[str]`; `@assistant` gets `["coder", "writer", "research"]`, specialists get `["assistant"]`.
+- [ ] ARCH-2 · Specialized personas: add restricted `call_agent` to `tools_enabled` — `coder.yaml`, `writer.yaml`, `research.yaml` have no `call_agent`; they cannot escalate. Fix: add `call_agent` to each with `when_to_use: "Si la tâche dépasse les outils disponibles — escalader à @assistant uniquement"`.
+- [ ] ARCH-3 · `__main__.py`: build both `call_agent` variants — currently one variant with wrong router. Fix: build two variants: `@assistant` → `make_call_agent_tool(router, registry, allowed_targets=["coder", "writer", "research"])`; specialists → `make_call_agent_tool(router, registry, allowed_targets=["assistant"])`. Absorbs SMELL-2.
+- [ ] ARCH-4 · Anti-loop guard: block `@assistant → @assistant` — schema `enum` prevents it structurally; add explicit guard in handler: if `agent_name == current_persona_name` → raise `ToolError` immediately.
+
+**P2 — Severe smells**
+
+- [ ] SMELL-5 · `start_server` raises bare `RuntimeError` instead of `BackendError` — timeout path is not catchable via `except BackendError` in the router. Fix: replace with `BackendError`.
+- [ ] SMELL-6 · Synchronous I/O in async `_dispatch` coroutine — `_archive_session` calls `path.write_text` / `path.open` synchronously, blocking the event loop on large contexts. Fix: wrap in `asyncio.get_event_loop().run_in_executor(None, ...)`.
+- [ ] SMELL-8 · Zero tests for streaming path — 197 tests cover non-streaming only; no test covers `chat_completion_stream`, SSE tool-call accumulation, or `text_delta` vs `text` distinction. SSE parsing bugs are invisible. Fix: add `tests/test_streaming.py` with SSE mocks for local, Anthropic, and OpenAI backends.
+- [ ] BUG-6 · Double `Callable` import + `TYPE_CHECKING` block at end of file in `llama_manager.py` — `Callable` imported at lines 21 and 23; `if TYPE_CHECKING` block placed at end of file instead of top. Fix: merge imports, move `TYPE_CHECKING` block to file header.
+
+**P3 — Silent dead fields**
+
+- [ ] MISSING-2 · `semantic_search: true` has no effect and no warning — key is reserved for v0.2; if set, nothing happens silently. Fix: log a warning at startup if `config.memory.semantic_search is True`.
+- [ ] MISSING-3 · `web_enabled: true` has no effect and no warning — same pattern as MISSING-2. Fix: log a warning at startup if `config.daemon.web_enabled is True`.
+- [ ] MISSING-4 · `cloud_equivalent` and `fallback_model` in personas never consulted — router always uses `config.backends.cloud.anthropic.default_model`; persona-specific fallback is ignored. Fix: in `Router._cloud_completion`, use `cloud_equivalent` from request context as `model_override` when available.
+- [ ] SMELL-1 · `tools_optional` declared in YAMLs, never loaded — `persona_loader.py` and `__main__.py` ignore it completely; dead YAML. Fix (choose one): **Option A (recommended)** — implement loading in `__main__._build_agents` with the same patterns as `tools_enabled`; **Option B** — remove `tools_optional` from all YAMLs and `_base.yaml`, document the removal.
+
+**Exit criterion:** 197 + N tests passing (N = streaming tests + bidirectional routing tests added). BUG-1 to BUG-6 confirmed fixed by code review. No silent behavior for reserved config fields. Scenario validated: `@coder` calls `@assistant` which delegates to `@research` — result propagates back to `@coder` without loop.
+
+---
+
+### Phase 5.6 — Multi-agent UX + daemon fixes `[x]`
+
+**Goal:** Make multi-agent workflows usable end-to-end — per-persona model selection, pre-call setup wizard, and fix persistent daemon bugs (orphan process, double menu, false-positive errors).
+
+**CLI — Multi-agent UX**
+
+- [x] Per-persona model selection — `/model <id>` in a sub-agent tab saves the model for that persona only (not global); persisted in `cli_state.json` as `persona_models: dict[str, str]`; propagated in every IPC chat request
+- [x] Persona picker via header icon — clicking the ⭘ header icon opens `PersonaPickerScreen` (modal ListView: name, description, model, active/tab markers); Enter = open tab, N = new chat, Esc = close
+- [x] Fix double-menu bug — subclassing `HeaderIcon` fired both parent and child handlers via Textual's MRO dispatch; replaced with `action_command_palette` override on App + `COMMAND_PALETTE_BINDING = ""` + `Binding("ctrl+p", "real_command_palette")` for the real palette
+- [x] Header icon tooltip — patched to "Open persona picker" in `on_mount` (overrides Textual's default "Open the command palette")
+- [x] Pre-call model setup wizard — blocking prompt emitted by daemon via `persona_setup_required` event before the first sub-agent call; CLI shows numbered model list (Enter = same as @assistant); choice saved permanently to `_persona_models`
+- [x] Setup persona: recommended model always shown — `default_model` from persona YAML shown even if not downloaded, marked `⬇ download needed`; download triggered automatically when selected
+
+**Daemon — Bidirectional mid-stream communication**
+
+- [x] `core/context_vars.py` — `ContextVar[dict[str, str]]` for `persona_models` and `ContextVar[Callable]` for `persona_setup_fn`; propagation without changing call signatures
+- [x] Daemon reader task + inbox queue — `_handle_connection` restructured: `_reader` task feeds all incoming messages into `asyncio.Queue`; chat handler and `_side_channel` task consume from same queue
+- [x] `_side_channel` task — runs concurrently with `agent.run()` stream; receives `persona.model.confirm` messages and resolves `asyncio.Future` objects that `call_agent` is awaiting
+
+**Bug fixes**
+
+- [x] Fix orphan llama-server — on daemon restart, `LocalBackendManager._proc = None` even if a previous llama-server is still running on the port; `_proc.poll()` returned non-None (dead new process), so `is_loaded = False` every message; fix: `_kill_orphan()` in `_start_sync` kills any process on the configured port matching our binary via `fuser` + `/proc/<pid>/cmdline`
+- [x] Fix false-positive red in `_write_tool_result` — `"error" in body` was True for all `call_agent` results (JSON contains `"errors"` key); replaced with `output.get("error")` check on the actual dict
+- [x] Robustness: `errors`/`agent_out` in tool_result handler made defensive against None/unexpected types
+
+**Exit criterion:** User can call `@coder` from `@assistant`, get the pre-call model setup wizard on first call, select a model (with auto-download if needed), and have the choice persist for future calls. Persona picker opens on header icon click. Ctrl+P opens Textual command palette. No "loading/loaded" spam after daemon restart.
+
+---
+
 ## v0.2 Phases (deferred)
 
 ### Phase 6 — Desktop GUI `[ ]`
@@ -267,3 +334,4 @@ Blocked until Phase 6 (reuses Svelte components).
 - **2026-04-02** — Phase 5.3 complete. All 12 fixes applied: SecurityConfig + path guard, git subprocess_exec, bash blocklist, streaming (local+cloud+CLI), Anthropic tool-result format conversion, persistent httpx client, memory deduplication, ping healthcheck, LLMRuntimeError rename, auto_fallback_threshold removed, call_agent hint shortened, integration test added. 197 tests passing.
 - **2026-04-02** — Multi-persona daemon routing. Daemon now accepts `agents: dict[str, Agent]` and routes each request by `agent_id`. Each persona has a filtered ToolRegistry (tools from `tools_enabled` only), per-persona memory hooks, and an isolated system prompt. `/agent` CLI command removed (duplicate of `/persona`). `/persona` info now shows actual memory file paths and sizes. Vestigial `memory_context` field removed from all persona YAMLs. 197 tests passing.
 - **2026-04-02** — Arrow key + Tab autocomplete navigation in CLI. Down/Tab cycles forward through slash command suggestions, Up cycles back. Selected entry highlighted white-on-blue. Fixed async Textual event bug: replaced sync `_completing` flag with `_completion_base` to preserve the full match list during navigation.
+- **2026-04-04** — Phase 5.5 complete. 17 items fixed: BUG-1 (`_openai_completion` dead return), BUG-2 (NameError on `log` in `ensure_loaded`), BUG-3 (streaming archive empty), BUG-4 (double tool list in system prompt), BUG-5 (sub-agents missing memory hooks), BUG-6 (double import + TYPE_CHECKING at EOF), ARCH-1/2/3/4 (bidirectional routing: `allowed_targets`, specialist `call_agent`, two variants in `__main__`, anti-loop guard), SMELL-1 (`tools_optional` now loaded), SMELL-2 (AgentRouter removed, LLM router passed), SMELL-5 (`RuntimeError` → `BackendError`), SMELL-6 (sync I/O in async coroutine wrapped in executor), SMELL-8 (test_streaming.py: 12 new tests). MISSING-2/3 (warnings for reserved config keys), MISSING-4 (`cloud_equivalent` used as default model per persona). 197 → 209 tests passing.

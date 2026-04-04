@@ -18,13 +18,17 @@ import sys
 import tarfile
 import time
 import zipfile
-from typing import Callable, Optional
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Optional
+
+if TYPE_CHECKING:
+    from core.config import Config
 
 import httpx
 
 from core.errors import BackendError
+
+log = logging.getLogger(__name__)
 
 LLAMA_RELEASES_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
 
@@ -286,7 +290,7 @@ def start_server(
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
-        raise RuntimeError(
+        raise BackendError(
             f"llama-server did not become ready within {startup_timeout}s on port {port}. "
             f"Exit code: {proc.returncode}"
         )
@@ -470,9 +474,43 @@ class LocalBackendManager:
     # Private sync helpers (run inside executor to avoid blocking the loop)
     # ------------------------------------------------------------------
 
+    def _kill_orphan(self) -> None:
+        """Kill any existing llama-server on the configured port (orphan from previous session)."""
+        port = self._config.backends.local.port
+        binary = str(SERVER_BINARY)
+        log = logging.getLogger(__name__)
+        try:
+            result = subprocess.run(
+                ["fuser", f"{port}/tcp"],
+                capture_output=True, text=True, timeout=3,
+            )
+            for pid_str in result.stdout.split():
+                try:
+                    pid = int(pid_str.strip())
+                    try:
+                        with open(f"/proc/{pid}/cmdline", "rb") as f:
+                            cmdline = f.read().replace(b"\x00", b" ").decode(errors="replace")
+                        if binary in cmdline:
+                            log.info("JIT: killing orphan llama-server (pid=%d, port=%d)", pid, port)
+                            os.kill(pid, signal.SIGTERM)
+                            time.sleep(0.5)
+                            try:
+                                os.kill(pid, 0)
+                                os.kill(pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                    except (FileNotFoundError, PermissionError):
+                        pass
+                except ValueError:
+                    pass
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass  # fuser not available or timeout — proceed anyway
+
     def _start_sync(self, model_path: Path) -> None:
         local_cfg = self._config.backends.local
         log = logging.getLogger(__name__)
+        # Kill any orphan llama-server on our port (stale from previous daemon run)
+        self._kill_orphan()
         log.info("JIT: starting llama-server with model %r...", model_path.name)
         self._proc = start_server(
             model_path=model_path,
@@ -493,7 +531,3 @@ class LocalBackendManager:
             stop_server(self._proc)
             self._proc = None
             self._loaded_model = None
-
-
-if TYPE_CHECKING:
-    from core.config import Config

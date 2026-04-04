@@ -143,7 +143,8 @@ class TestDetectBestBackend:
 # ── llama_manager ─────────────────────────────────────────────────────────────
 
 class TestStartServer:
-    def test_raises_runtime_error_if_port_not_ready(self, tmp_path):
+    def test_raises_backend_error_if_port_not_ready(self, tmp_path):
+        from core.errors import BackendError
         from core.runtime.llama_manager import start_server, BIN_DIR
 
         fake_binary = tmp_path / "llama-server"
@@ -160,7 +161,7 @@ class TestStartServer:
             mock_proc.returncode = 1
             mock_popen.return_value = mock_proc
 
-            with pytest.raises(RuntimeError, match="did not become ready within"):
+            with pytest.raises(BackendError, match="did not become ready within"):
                 start_server(
                     model_path=tmp_path / "model.gguf",
                     backend="cpu",

@@ -32,9 +32,13 @@ lmagent-plus/
 │   ├── tools/
 │   │   ├── bash.py
 │   │   ├── file_ops.py
-│   │   └── git.py
+│   │   ├── git.py
+│   │   ├── call_agent.py
+│   │   ├── memory_ops.py
+│   │   └── _path_guard.py
 │   │   # v0.2: web_search.py, mcp_bridge.py
 │   └── memory/
+│       ├── __init__.py
 │       └── para_store.py
 │       # v0.2: semantic_index.py
 │
@@ -95,27 +99,25 @@ python -m core
 
 Which:
 1. Loads config from `~/.lmagent-plus/config.yaml` (creates defaults on first run)
-2. Starts `llama-server` if local backend is configured (Phase 1)
-3. Initializes the tool registry
-4. Loads active personas
-5. Loads memory context
-6. Starts the WebSocket IPC server on `daemon.port`
+2. Initializes the JIT local backend manager (llama-server starts on first request, not at startup)
+3. Builds one Agent per persona, each with its own tool registry and memory hooks
+4. Starts the WebSocket IPC server on `daemon.port`
 
 ### `core/agent.py` — plugin pipeline
 
-The system prompt is assembled via a pipeline of callables:
+The system prompt is assembled via a pipeline of callables, composed in `__main__.py`:
 
 ```python
 # Each hook returns a string fragment to include in the system prompt
 system_prompt_hooks: list[Callable[[], str]] = [
-    persona_hook,    # injected by persona_loader (Phase 3)
-    memory_hook,     # injected by para_store (Phase 4)
-    tools_hook,      # always present (Phase 2)
+    app_hook,      # app-level context (make_app_system_hook)
+    global_hook,   # global memory context (store.make_global_memory_hook)
+    persona_hook,  # persona system prompt + tools + per-agent memory
 ]
 system_prompt = "\n\n".join(hook() for hook in system_prompt_hooks)
 ```
 
-Phases 3 and 4 register their hooks into this pipeline. They do not modify the core loop logic.
+Each Agent gets its own frozen hook list at startup. Hooks do not modify the core loop logic.
 
 ### `core/ipc_protocol.py` — IPC contract
 
@@ -176,10 +178,9 @@ Scopes : core | gui | cli | memory | runtime | personas | installer | web
 
 ---
 
-## Multi-agent architecture (Phase 2.5)
+## Multi-agent architecture
 
-> This section documents the planned architecture. No multi-agent code exists yet.
-> Implementation target: Phase 2.5.
+> Implemented in v0.1. `call_agent` is a live tool available to all personas.
 
 ### Delegation pattern
 
@@ -249,27 +250,20 @@ In order of reliability:
 
 ---
 
-## Analyse d'impact
+## Notes d'implémentation
 
 ### Multi-agent architecture
-**Statut :** FUTURE (Phase 2.5)
+**Statut :** IMPLÉMENTÉ (v0.1)
 
-**Raison :**
-Il n'existe aucun code multi-agent aujourd'hui. `call_agent()` n'est pas implémenté,
-`router.py` fait uniquement du routing local/cloud (pas inter-agents).
-Phase 4 (Memory) et Phase 5 (CLI) fonctionnent entièrement dans le modèle single-agent.
-La documenter maintenant clarifie l'intention architecturale sans bloquer quoi que ce soit.
+`call_agent` est enregistré dans `core/tools/call_agent.py` et injecté automatiquement
+dans le registry de chaque persona qui le déclare dans `tools_enabled`.
 
-**Dépendances :**
-- Phase 2 (outil registry) : déjà complète — fournit la base pour enregistrer `call_agent`
-- Phase 3 (personas) : déjà complète — fournit le format YAML qui définira `@assistant` comme orchestrateur
-- Nouveau fichier `core/tools/call_agent.py` à créer en Phase 2.5
-- Mise à jour de `personas/assistant.yaml` pour utiliser `call_agent` comme outil primaire
+Routing bidirectionnel :
+- `@assistant` peut déléguer à `["coder", "writer", "research"]`
+- Les personas spécialisés peuvent escalader vers `["assistant"]` uniquement
 
-**Blocker pour :**
-- Phase 4 (Memory) ? **Non** — la mémoire est single-agent, pas inter-agents
-- Phase 5 (CLI) ? **Non** — le CLI n'a pas besoin de routing multi-agent pour fonctionner
-- Phase 2.5 lui-même ? **Oui** — c'est l'objet de la phase
+Le routing inter-agents passe par le même `Router` que les appels LLM normaux —
+il n'y a pas de canal séparé.
 
 ---
 

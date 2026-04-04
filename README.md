@@ -109,12 +109,14 @@ routing:
 
 ## Personas
 
-| Persona | Recommended local model | Tools | Use for |
-|---------|------------------------|-------|---------|
-| `@assistant` | Mistral 7B | bash, file_ops, call_agent | General purpose, delegation |
-| `@coder` | Qwen3-Coder 30B | bash, file_ops, git | Development tasks |
-| `@writer` | Mistral 7B | file_ops | Writing, editing, summarizing |
-| `@research` | DeepSeek R1 8B | file_ops | Analysis, reasoning, document review |
+| Persona | Recommended local model | Min RAM | Tools | Use for |
+|---------|------------------------|---------|-------|---------|
+| `@assistant` | Mistral 7B | 8 GB | bash, file_ops, call_agent | General purpose, delegation |
+| `@coder` | Qwen3-Coder 30B | 24 GB | bash, file_ops, git | Development tasks |
+| `@writer` | Mistral 7B | 8 GB | file_ops | Writing, editing, summarizing |
+| `@research` | DeepSeek R1 8B | 8 GB | file_ops | Analysis, reasoning, document review |
+
+> VRAM figures apply to GPU inference (Vulkan/CUDA/Metal). CPU inference requires at least 2× the model size in RAM.
 
 Switch with `/persona <name>`. Each persona gets its own memory under `~/.lmagent-plus/memory/agents/<name>/`.
 

@@ -98,30 +98,31 @@ persona:
 
 ### `coder.yaml`
 
-Specialized for development. Tools: bash, file_ops, git.
+Specialized for development. Tools: `file_ops`, `git`, `bash`, `call_agent`.
 Recommended model: Qwen3 Coder.
-Designed for: clone, read/write code, git operations, structure analysis.
+Designed for: read/write code, git operations, structure analysis, task escalation.
 
 **Key rule in system prompt:** use only the provided tools.
 Never offer to open a browser for a git or filesystem task.
 
 ### `writer.yaml`
 
-Specialized for writing. Tools: file_ops only by default.
+Specialized for writing. Tools: `file_ops`, `call_agent`.
 Recommended model: Mistral 7B.
 Designed for: writing, summarizing, rephrasing, content generation.
 
 ### `research.yaml`
 
-Specialized for analysis and reasoning. Tools: web_search enabled by default (v0.2).
+Specialized for analysis and reasoning. Tools: `file_ops`, `call_agent`.
 Recommended model: DeepSeek R1.
 Designed for: research, synthesis, comparisons, multi-step reasoning.
+`web_search` planned for v0.2.
 
 ### `assistant.yaml`
 
-General-purpose agent. All tools optional.
+General-purpose orchestrator. Tools enabled: `call_agent`, `file_ops`, `bash`. Optional: `git`.
 Recommended model: Mistral 7B or equivalent.
-Designed for: general use, Q&A, mixed tasks.
+Designed for: general use, Q&A, mixed tasks, and delegating to specialist agents.
 
 ---
 
@@ -208,10 +209,10 @@ Les personas actuels ont tous ≤ 3 outils, donc le risque d'hallucination est d
 **Statut :** RECOMMENDED
 
 **État actuel :**
-- `coder.yaml` : 3 outils (bash, file_ops, git) ✓
-- `writer.yaml` : 1 outil (file_ops) ✓
-- `research.yaml` : 1 outil (file_ops) ✓
-- `assistant.yaml` : 3 outils (bash, file_ops + git optional) ✓
+- `coder.yaml` : 4 outils (file_ops, git, bash, call_agent) ✓
+- `writer.yaml` : 2 outils (file_ops, call_agent) ✓
+- `research.yaml` : 2 outils (file_ops, call_agent) ✓
+- `assistant.yaml` : 3 outils enabled (call_agent, file_ops, bash) + git optional ✓
 
 **Raison :**
 Tous les personas respectent déjà la limite. La règle est donc préventive —

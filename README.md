@@ -18,13 +18,13 @@ A Python daemon handles the agent loop, tool execution, and memory. A Textual TU
 
 - **Self-contained runtime** — downloads the right llama.cpp binary automatically (CUDA / ROCm / Vulkan / Metal / CPU)
 - **Built-in model manager** — pull models from HuggingFace directly from the TUI (`/hf`, `/model`)
-- **Multi-persona routing** — `@assistant`, `@coder`, `@writer`, `@research` — each with its own tool set, system prompt, and memory
+- **Multi-persona routing** — `@assistant`, `@coder`, `@writer`, `@research` — each with its own tool set, system prompt, memory, and model override (`/model` in any tab)
 - **Tool use** — bash, file read/write/list, git, memory persistence (`update_memory`), agent delegation (`call_agent`)
 - **Two-layer memory** — global context shared across personas + private memory per persona, injected at the start of each session
 - **Streaming responses** — real-time output for local (llama-server SSE) and cloud (Anthropic / OpenAI)
 - **Security** — path guard (blocks writes to `/etc`, `~/.ssh`, etc.), bash blocklist, git command injection protection
 - **Cloud routing** — route requests to Anthropic or OpenAI instead of (or alongside) a local model
-- **TUI** — slash commands, arrow key autocomplete, tab switching between agents, live tool call display, theme persistence
+- **TUI** — slash commands, arrow key autocomplete, tab switching between agents, live tool call display, theme persistence, persona picker (header icon)
 
 **Not yet available** — desktop GUI, web interface, installer scripts, MCP bridge, web search. See [PLAN.md](PLAN.md).
 
@@ -85,6 +85,8 @@ In another terminal, start the TUI:
 ```
 
 Use **Up / Down / Tab** to navigate slash command autocomplete.
+
+Click the **header icon** (top-left ⭘) to open the persona picker — switch personas, see active tabs, change the model for a specific agent. **Ctrl+P** opens the command palette.
 
 ### Cloud-only (no local model)
 

@@ -250,20 +250,19 @@ In order of reliability:
 
 ---
 
-## Notes d'implémentation
+## Implementation notes
 
 ### Multi-agent architecture
-**Statut :** IMPLÉMENTÉ (v0.1)
+**Status:** Implemented in v0.1
 
-`call_agent` est enregistré dans `core/tools/call_agent.py` et injecté automatiquement
-dans le registry de chaque persona qui le déclare dans `tools_enabled`.
+`call_agent` is registered in `core/tools/call_agent.py` and injected automatically
+into each persona's registry when `call_agent` appears in `tools_enabled`.
 
-Routing bidirectionnel :
-- `@assistant` peut déléguer à `["coder", "writer", "research"]`
-- Les personas spécialisés peuvent escalader vers `["assistant"]` uniquement
+Bidirectional routing:
+- `@assistant` can delegate to `["coder", "writer", "research"]`
+- Specialist personas can escalate to `["assistant"]` only
 
-Le routing inter-agents passe par le même `Router` que les appels LLM normaux —
-il n'y a pas de canal séparé.
+Inter-agent calls go through the same `Router` as regular LLM calls — no separate channel.
 
 ---
 

@@ -188,36 +188,24 @@ with common local models (Qwen, Mistral, DeepSeek, Llama).
 
 ---
 
-## Analyse d'impact
+## Notes
 
-### `when_to_use` dans les personas
-**Statut :** RECOMMENDED
+### `when_to_use` field
+**Status:** Recommended — already implemented in all personas.
 
-**Raison :**
-`when_to_use` est une amélioration de fiabilité, pas un prérequis structurel.
-Phase 4 (Memory) et Phase 5 (CLI) n'en dépendent pas — elles opèrent au niveau
-du pipeline de prompt (`memory_hook`, `tools_hook`) sans connaître les hints individuels.
-Les personas actuels ont tous ≤ 3 outils, donc le risque d'hallucination est déjà faible.
-À implémenter idéalement en Phase 2.5 quand on touche au registre d'outils pour le routing.
+`when_to_use` is a reliability improvement, not a structural requirement.
+All 4 personas already include it on every tool. Keep it on any new persona or tool addition.
 
-**À faire :**
-- Documenter `when_to_use` comme champ attendu dans `tool_registry.py` (schema JSON)
-- Mettre à jour les 4 personas existants avec des hints quand Phase 2.5 démarre
-- Pour l'instant : la doc est à jour, le code peut attendre
+### Tool count limit
+**Status:** Recommended — all personas currently comply.
 
-### Limite 4–5 outils
-**Statut :** RECOMMENDED
+Current state:
+- `coder.yaml` : 4 tools (file_ops, git, bash, call_agent) ✓
+- `writer.yaml` : 2 tools (file_ops, call_agent) ✓
+- `research.yaml` : 2 tools (file_ops, call_agent) ✓
+- `assistant.yaml` : 3 tools enabled (call_agent, file_ops, bash) + git optional ✓
 
-**État actuel :**
-- `coder.yaml` : 4 outils (file_ops, git, bash, call_agent) ✓
-- `writer.yaml` : 2 outils (file_ops, call_agent) ✓
-- `research.yaml` : 2 outils (file_ops, call_agent) ✓
-- `assistant.yaml` : 3 outils enabled (call_agent, file_ops, bash) + git optional ✓
-
-**Raison :**
-Tous les personas respectent déjà la limite. La règle est donc préventive —
-elle empêche la dérive lors de l'ajout de nouveaux outils (web_search, mcp_bridge en v0.2).
-La documenter maintenant est peu coûteux et évite un problème futur.
+The rule is preventive — it guards against drift when new tools are added (web_search, mcp_bridge in v0.2).
 
 ---
 

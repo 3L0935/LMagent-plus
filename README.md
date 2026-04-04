@@ -173,7 +173,9 @@ For everything else: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Status
 
-Active development — v0.1 core is complete and tested. See [PLAN.md](PLAN.md) for the roadmap.
+[![CI](https://github.com/3L0935/LMagent-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/3L0935/LMagent-plus/actions/workflows/ci.yml)
+
+Active development — v0.1 core is complete and tested. 197 tests — `uv run pytest`. See [PLAN.md](PLAN.md) for the roadmap.
 
 ---
 

@@ -183,11 +183,22 @@ POST http://localhost:8080/v1/chat/completions
 
 ```yaml
 models:
+  - id: "qwen3-1.7b-q4"
+    display_name: "Qwen3 1.7B (Q4)"
+    description: "Tiny generalist — fast, low resource, good for testing"
+    hf_repo: "unsloth/Qwen3-1.7B-GGUF"
+    hf_file: "Qwen3-1.7B-Q4_K_M.gguf"
+    size_gb: 1.1
+    min_vram_gb: 2
+    min_ram_gb: 4
+    recommended_for: ["assistant"]
+    tags: ["general", "tiny"]
+
   - id: "qwen3-coder-30b-q4"
-    display_name: "Qwen3 Coder 30B (Q4)"
-    description: "Best for code — requires ~18 GB VRAM or RAM"
-    hf_repo: "Qwen/Qwen3-Coder-30B-Instruct-GGUF"
-    hf_file: "qwen3-coder-30b-instruct-q4_k_m.gguf"
+    display_name: "Qwen3 Coder 30B A3B (Q4)"
+    description: "Best for code — MoE, activates 3B params, requires ~18 GB VRAM or RAM"
+    hf_repo: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF"
+    hf_file: "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
     size_gb: 18.2
     min_vram_gb: 16
     min_ram_gb: 24
@@ -195,10 +206,10 @@ models:
     tags: ["code", "large"]
 
   - id: "qwen3-coder-8b-q4"
-    display_name: "Qwen3 Coder 8B (Q4)"
+    display_name: "MD-Coder Qwen3 8B (Q4)"
     description: "Good for code — runs on most machines"
-    hf_repo: "Qwen/Qwen3-Coder-8B-Instruct-GGUF"
-    hf_file: "qwen3-coder-8b-instruct-q4_k_m.gguf"
+    hf_repo: "mradermacher/MD-Coder-Qwen3-8B-GGUF"
+    hf_file: "MD-Coder-Qwen3-8B.Q4_K_M.gguf"
     size_gb: 4.5
     min_vram_gb: 4
     min_ram_gb: 8
@@ -206,10 +217,10 @@ models:
     tags: ["code", "small"]
 
   - id: "mistral-7b-q4"
-    display_name: "Mistral 7B (Q4)"
+    display_name: "Mistral 7B Claude-instruct (Q4)"
     description: "Good generalist — lightweight and fast"
-    hf_repo: "mistralai/Mistral-7B-Instruct-v0.3-GGUF"
-    hf_file: "Mistral-7B-Instruct-v0.3.Q4_K_M.gguf"
+    hf_repo: "mradermacher/Mistral-7B-claude-instruct-GGUF"
+    hf_file: "Mistral-7B-claude-instruct.Q4_K_M.gguf"
     size_gb: 4.1
     min_vram_gb: 4
     min_ram_gb: 8
@@ -217,10 +228,10 @@ models:
     tags: ["general", "small"]
 
   - id: "deepseek-r1-8b-q4"
-    display_name: "DeepSeek R1 8B (Q4)"
+    display_name: "DeepSeek R1 Distill Llama 8B (Q4)"
     description: "Reasoning — good for analytical tasks"
-    hf_repo: "unsloth/DeepSeek-R1-0528-Qwen3-8B-GGUF"
-    hf_file: "DeepSeek-R1-0528-Qwen3-8B-Q4_K_M.gguf"
+    hf_repo: "unsloth/DeepSeek-R1-Distill-Llama-8B-GGUF"
+    hf_file: "DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf"
     size_gb: 4.9
     min_vram_gb: 4
     min_ram_gb: 8

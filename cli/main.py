@@ -40,17 +40,36 @@ from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.screen import ModalScreen
-from textual.widgets import Footer, Header, Input, ListView, ListItem, RichLog, Static, TabbedContent, TabPane
+from textual.widgets import (
+    Footer,
+    Header,
+    Input,
+    ListView,
+    ListItem,
+    RichLog,
+    Static,
+    TabbedContent,
+    TabPane,
+)
 
 from core.config import Config
+from core import __version__
 
 _CLI_STATE = Path.home() / ".lmagent-plus" / "cli_state.json"
-_USER_DIR   = Path.home() / ".lmagent-plus"
+_USER_DIR = Path.home() / ".lmagent-plus"
 
 SLASH_COMMANDS = [
-    "/help", "/persona", "/tools",
-    "/model", "/models", "/hf", "/setup",
-    "/reload", "/clear", "/stop", "/status",
+    "/help",
+    "/persona",
+    "/tools",
+    "/model",
+    "/models",
+    "/hf",
+    "/setup",
+    "/reload",
+    "/clear",
+    "/stop",
+    "/status",
 ]
 
 
@@ -114,7 +133,13 @@ RichLog {
 }
 
 Input {
-    margin: 0 1 1 1;
+    margin: 0 1 0 1;
+}
+
+#hint-bar {
+    height: 1;
+    content-align: center middle;
+    color: $text-muted;
 }
 """
 
@@ -122,6 +147,7 @@ Input {
 # ---------------------------------------------------------------------------
 # Pure helpers (testable without Textual)
 # ---------------------------------------------------------------------------
+
 
 def parse_slash_command(text: str) -> tuple[str, list[str]]:
     """Parse '/cmd arg1 arg2' → ('cmd', ['arg1', 'arg2']).
@@ -171,10 +197,10 @@ async def _download_model_httpx(
     Returns:
         Path to the downloaded model.gguf file.
     """
-    url    = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
+    url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
     dest_dir.mkdir(parents=True, exist_ok=True)
     target = dest_dir / "model.gguf"
-    tmp    = dest_dir / "model.gguf.part"
+    tmp = dest_dir / "model.gguf.part"
 
     if target.exists():
         return target
@@ -182,8 +208,8 @@ async def _download_model_httpx(
     async with httpx.AsyncClient(follow_redirects=True, timeout=None) as client:
         async with client.stream("GET", url) as resp:
             resp.raise_for_status()
-            total     = int(resp.headers.get("content-length", 0))
-            received  = 0
+            total = int(resp.headers.get("content-length", 0))
+            received = 0
             with tmp.open("wb") as f:
                 async for chunk in resp.aiter_bytes(65536):
                     f.write(chunk)
@@ -245,6 +271,7 @@ class PersonaPickerScreen(ModalScreen):
     BINDINGS = [
         Binding("escape", "dismiss(None)", "Close", show=True),
         Binding("n", "new_chat", "New chat", show=True),
+        Binding("d", "toggle_tab", "Toggle tab", show=True, priority=True),
     ]
 
     def __init__(
@@ -260,17 +287,21 @@ class PersonaPickerScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         from textual.containers import Vertical
+
         with Vertical(id="picker-box"):
             yield Static("[bold]Personas[/bold]", id="picker-title", markup=True)
             with ListView(id="picker-list"):
                 for name, desc, model in self._personas_info:
-                    active = name == self._current_persona
                     has_tab = name in self._existing_tabs
-                    active_tag = "  [yellow]◀ active[/yellow]" if active else ""
-                    tab_tag    = "  [dim](tab open)[/dim]" if has_tab and not active else ""
+                    is_running = name == self._current_persona and has_tab
+                    status_tag = ""
+                    if is_running:
+                        status_tag = "  [bold green]▶ running[/bold green]"
+                    elif has_tab:
+                        status_tag = "  [bold yellow]○ open[/bold yellow]"
                     yield ListItem(
                         Static(
-                            f"[bold cyan]@{escape(name)}[/bold cyan]{active_tag}{tab_tag}\n"
+                            f"[bold cyan]@{escape(name)}[/bold cyan]{status_tag}\n"
                             f"  [dim]{escape(desc)}[/dim]\n"
                             f"  [dim]model: {escape(model)}[/dim]",
                             markup=True,
@@ -278,10 +309,17 @@ class PersonaPickerScreen(ModalScreen):
                         id=f"pick-{name}",
                     )
             yield Static(
-                "[dim]Enter = open tab   [bold]n[/bold] = new chat   Esc = close[/dim]",
+                "[dim]Enter = open   [bold]n[/bold] = new chat   [bold]d[/bold] = close   Esc = close[/dim]",
                 id="picker-hint",
                 markup=True,
             )
+
+    def on_mount(self) -> None:
+        lv = self.query_one("#picker-list", ListView)
+        for i, (name, _, _) in enumerate(self._personas_info):
+            if name in self._existing_tabs and name != "assistant":
+                lv.index = i
+                break
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         persona = (event.item.id or "").removeprefix("pick-")
@@ -295,10 +333,35 @@ class PersonaPickerScreen(ModalScreen):
         if persona:
             self.dismiss(("new", persona))
 
+    def action_close_tab(self) -> None:
+        lv = self.query_one("#picker-list", ListView)
+        item = lv.highlighted_child
+        persona = (item.id or "").removeprefix("pick-") if item else ""
+        if persona:
+            self.dismiss(("close", persona))
+
+    def action_toggle_tab(self) -> None:
+        lv = self.query_one("#picker-list", ListView)
+        index = lv.index
+        if index is None:
+            return
+        try:
+            persona = self._personas_info[index][0]
+        except IndexError:
+            return
+        if not persona:
+            return
+        # Dismiss with debug info appended
+        if persona in self._existing_tabs:
+            self.dismiss(("close", persona))
+        else:
+            self.dismiss(("open", persona))
+
 
 # ---------------------------------------------------------------------------
 # Textual app
 # ---------------------------------------------------------------------------
+
 
 class LMAgentTUI(App[None]):
     """LMAgent-Plus terminal interface."""
@@ -310,6 +373,7 @@ class LMAgentTUI(App[None]):
         Binding("escape", "cancel_response", "Cancel", show=True),
         Binding("ctrl+c", "quit", "Quit", show=True),
         Binding("ctrl+p", "real_command_palette", "Commands", show=True),
+        Binding("f2", "open_persona_picker", "Personas", show=True),
         Binding("tab", "complete_next", "Complete", show=False, priority=True),
     ]
 
@@ -319,11 +383,11 @@ class LMAgentTUI(App[None]):
         self._model_override: str | None = None
         self._persona_models: dict[str, str] = {}  # per sub-agent model overrides
         # Mid-stream persona setup state
-        self._stream_ws: Any = None          # active WebSocket during _run_chat
-        self._setup_active: bool = False          # True while waiting for user model choice
-        self._setup_persona: str = ""             # persona being configured
-        self._setup_model_list: list[str] = []    # numbered options shown to user
-        self._setup_assistant_model: str = ""     # "Enter = same as assistant"
+        self._stream_ws: Any = None  # active WebSocket during _run_chat
+        self._setup_active: bool = False  # True while waiting for user model choice
+        self._setup_persona: str = ""  # persona being configured
+        self._setup_model_list: list[str] = []  # numbered options shown to user
+        self._setup_assistant_model: str = ""  # "Enter = same as assistant"
         self._setup_needs_download: set[str] = set()  # options that require download
         self._ws_task: asyncio.Task[None] | None = None
         self._streaming = False
@@ -343,27 +407,45 @@ class LMAgentTUI(App[None]):
         # Autocomplete navigation state
         self._completion_matches: list[str] = []
         self._completion_idx: int = -1
-        self._completion_base: str = ""  # original typed text that generated the match list
+        self._completion_base: str = (
+            ""  # original typed text that generated the match list
+        )
         super().__init__()
 
     # ── Composition ────────────────────────────────────────────────────────────
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield Header(show_clock=True)
         with TabbedContent(id="agent-tabs"):
             with TabPane("@assistant", id="tab-assistant"):
-                yield RichLog(markup=True, highlight=False, wrap=True, id="chat-assistant")
+                yield RichLog(
+                    markup=True, highlight=False, wrap=True, id="chat-assistant"
+                )
         yield Static("", id="completions", markup=True)
         yield Static("", id="streaming-preview", markup=True)
         yield Input(placeholder="Type a message or /help…", id="input")
+        yield Static("", id="hint-bar", markup=True)
         yield Footer(show_command_palette=False)
 
     def on_mount(self) -> None:
         from textual.widgets._header import HeaderIcon
+
+        self.title = f"LMAgent-Plus v{__version__}"
+        self.sub_title = "Local AI Orchestrator"
         try:
             self.query_one(HeaderIcon).tooltip = "Open persona picker"
         except Exception:
             pass
+
+        # Hint bar - right aligned at bottom
+        try:
+            self.query_one("#hint-bar", Static).update(
+                f"[dim]ws://127.0.0.1:{self._config.daemon.port}[/dim]  |  "
+                "[dim]Type [bold]/help[/bold] for commands  |  [bold]/setup[/bold] to set up[/dim]"
+            )
+        except Exception:
+            pass
+
         state = self._load_ui_state()
         if "theme" in state:
             self.theme = state["theme"]
@@ -372,11 +454,6 @@ class LMAgentTUI(App[None]):
         if "persona_models" in state:
             self._persona_models = state["persona_models"]
         self._update_subtitle()
-        self._write_system(
-            f"Daemon: [cyan]ws://127.0.0.1:{self._config.daemon.port}[/cyan]  "
-            f"Agent: [green]@{self._persona}[/green]  "
-            "Type [bold]/help[/bold] for commands"
-        )
         self.set_interval(5, self._poll_notifications)
 
     # ── Input handling ─────────────────────────────────────────────────────────
@@ -406,7 +483,9 @@ class LMAgentTUI(App[None]):
         if self._download_confirm_pending:
             self._download_confirm_pending = False
             if text.lower() in ("y", "yes") and self._pending_download_id:
-                asyncio.create_task(self._download_and_reload(self._pending_download_id))
+                asyncio.create_task(
+                    self._download_and_reload(self._pending_download_id)
+                )
                 self._pending_download_id = None
             else:
                 self._write_system("[dim]Download cancelled.[/dim]")
@@ -447,6 +526,7 @@ class LMAgentTUI(App[None]):
         elif cmd == "persona":
             if args:
                 from core.persona_loader import list_personas as _list_personas
+
                 valid = _list_personas()
                 name = args[0].lower()
                 if name not in valid:
@@ -533,7 +613,8 @@ class LMAgentTUI(App[None]):
         # Always check the local catalog first, regardless of current routing.
         try:
             from core.runtime.model_manager import _load_catalog, list_downloaded_models
-            catalog   = {m["id"]: m for m in _load_catalog()}
+
+            catalog = {m["id"]: m for m in _load_catalog()}
             downloaded = {m["id"] for m in list_downloaded_models()}
 
             if model_id in catalog and model_id not in downloaded:
@@ -582,12 +663,14 @@ class LMAgentTUI(App[None]):
         uri = f"ws://127.0.0.1:{self._config.daemon.port}"
         try:
             async with websockets.connect(uri, open_timeout=2) as ws:
-                await ws.send(json.dumps({"jsonrpc": "2.0", "method": "poll", "id": "poll"}))
+                await ws.send(
+                    json.dumps({"jsonrpc": "2.0", "method": "poll", "id": "poll"})
+                )
                 raw = await ws.recv()
                 data = json.loads(str(raw))
                 for n in data.get("result", {}).get("notifications", []):
                     level = n.get("level", "info")
-                    msg   = n.get("message", "")
+                    msg = n.get("message", "")
                     color = "yellow" if level == "warning" else "dim"
                     self._write_system(f"[{color}]{escape(msg)}[/{color}]")
         except Exception:
@@ -602,11 +685,11 @@ class LMAgentTUI(App[None]):
                 resp = await client.get(
                     "https://huggingface.co/api/models",
                     params={
-                        "search":    query,
-                        "filter":    "gguf",
-                        "sort":      "downloads",
+                        "search": query,
+                        "filter": "gguf",
+                        "sort": "downloads",
                         "direction": "-1",
-                        "limit":     "12",
+                        "limit": "12",
                     },
                 )
                 resp.raise_for_status()
@@ -621,24 +704,30 @@ class LMAgentTUI(App[None]):
 
         try:
             from core.runtime.model_manager import _load_catalog, list_downloaded_models
-            catalog_ids    = {m["id"] for m in _load_catalog()}
+
+            catalog_ids = {m["id"] for m in _load_catalog()}
             downloaded_ids = {m["id"] for m in list_downloaded_models()}
         except Exception:
             catalog_ids, downloaded_ids = set(), set()
 
         catalog_hits = [r for r in results if r.get("id") in catalog_ids]
-        other_hits   = [r for r in results if r.get("id") not in catalog_ids]
+        other_hits = [r for r in results if r.get("id") not in catalog_ids]
 
         lines: list[str] = [
-            f"[bold]HuggingFace — GGUF results for '{escape(query)}'[/bold]", ""
+            f"[bold]HuggingFace — GGUF results for '{escape(query)}'[/bold]",
+            "",
         ]
 
         if catalog_hits:
             lines.append("[dim]In local catalog (use /model <id> to load):[/dim]")
             for m in catalog_hits:
-                mid  = m.get("id", "?")
-                dl   = m.get("downloads", 0)
-                tag  = "[green]✓ downloaded[/green]" if mid in downloaded_ids else "[dim]· not downloaded[/dim]"
+                mid = m.get("id", "?")
+                dl = m.get("downloads", 0)
+                tag = (
+                    "[green]✓ downloaded[/green]"
+                    if mid in downloaded_ids
+                    else "[dim]· not downloaded[/dim]"
+                )
                 lines.append(
                     f"  [cyan]{escape(mid)}[/cyan]  {tag}  [dim]{dl:,} downloads[/dim]"
                 )
@@ -648,7 +737,7 @@ class LMAgentTUI(App[None]):
             lines.append("[dim]Other results (not in catalog):[/dim]")
             for m in other_hits[:8]:
                 mid = m.get("id", "?")
-                dl  = m.get("downloads", 0)
+                dl = m.get("downloads", 0)
                 lines.append(
                     f"  [dim]·[/dim] [cyan]{escape(mid)}[/cyan]  [dim]{dl:,} downloads[/dim]"
                 )
@@ -682,7 +771,11 @@ class LMAgentTUI(App[None]):
         )
 
         try:
-            from core.runtime.backend_detector import detect_best_backend, BACKEND_DESCRIPTIONS
+            from core.runtime.backend_detector import (
+                detect_best_backend,
+                BACKEND_DESCRIPTIONS,
+            )
+
             best, statuses = await asyncio.get_running_loop().run_in_executor(
                 None, detect_best_backend
             )
@@ -696,9 +789,9 @@ class LMAgentTUI(App[None]):
             if st.get("available"):
                 desc = BACKEND_DESCRIPTIONS.get(name, {})
                 vram = st.get("vram_gb", 0)
-                ram  = st.get("ram_gb", 0)
-                hw   = f"{vram} GB VRAM" if vram else f"{ram} GB RAM"
-                rec  = " [yellow]← recommended[/yellow]" if name == best else ""
+                ram = st.get("ram_gb", 0)
+                hw = f"{vram} GB VRAM" if vram else f"{ram} GB RAM"
+                rec = " [yellow]← recommended[/yellow]" if name == best else ""
                 lines.append(
                     f"  [cyan]{name}[/cyan]  "
                     f"[dim]{escape(desc.get('tag', ''))}[/dim]  {hw}{rec}"
@@ -709,11 +802,11 @@ class LMAgentTUI(App[None]):
         # Default routing: local if hardware available, cloud otherwise
         default_routing = "local" if available else "cloud"
 
-        self._wizard_backends      = available
-        self._wizard_data          = {"_best": best, "_default_routing": default_routing}
+        self._wizard_backends = available
+        self._wizard_data = {"_best": best, "_default_routing": default_routing}
         self._wizard_catalog_picks = []
-        self._wizard_step          = 0
-        self._wizard_active        = True
+        self._wizard_step = 0
+        self._wizard_active = True
 
         self._write_system(
             "\n[bold]Step 1/5 — Routing[/bold]\n"
@@ -742,9 +835,10 @@ class LMAgentTUI(App[None]):
                 "\n\n  [yellow]API keys required for cloud routing.[/yellow]\n"
                 "  Set [bold]ANTHROPIC_API_KEY[/bold] and/or [bold]OPENAI_API_KEY[/bold]\n"
                 "  in your shell before starting the daemon  (e.g. in ~/.bashrc or ~/.profile)."
-                if choice in ("cloud", "auto") else ""
+                if choice in ("cloud", "auto")
+                else ""
             )
-            best  = self._wizard_data.get("_best", "cpu")
+            best = self._wizard_data.get("_best", "cpu")
             avail = self._wizard_backends
             self._write_system(
                 f"  [dim]Routing →[/dim] [cyan]{choice}[/cyan]{cloud_note}\n\n"
@@ -754,8 +848,8 @@ class LMAgentTUI(App[None]):
             )
 
         elif step == 1:  # backend
-            best   = self._wizard_data.get("_best", "cpu")
-            avail  = self._wizard_backends or [best]
+            best = self._wizard_data.get("_best", "cpu")
+            avail = self._wizard_backends or [best]
             choice = text.strip().lower() or best
             if choice not in avail:
                 self._write_system(
@@ -790,7 +884,9 @@ class LMAgentTUI(App[None]):
                 if idle < 0:
                     raise ValueError
             except ValueError:
-                self._write_system("[red]Enter a positive integer (seconds) or 0:[/red]")
+                self._write_system(
+                    "[red]Enter a positive integer (seconds) or 0:[/red]"
+                )
                 return
             self._wizard_data["idle_unload"] = idle
             self._wizard_step = 3
@@ -859,14 +955,15 @@ class LMAgentTUI(App[None]):
             else:
                 await self._apply_wizard()
             self._wizard_active = False
-            self._wizard_step   = 0
+            self._wizard_step = 0
 
     async def _wizard_show_model_step(self) -> None:
         """Step 6/6 — show downloaded models or suggest catalog picks."""
         try:
             from core.runtime.model_manager import _load_catalog, list_downloaded_models
+
             downloaded = list_downloaded_models()
-            catalog    = _load_catalog()
+            catalog = _load_catalog()
         except Exception as exc:
             self._write_error(f"Could not read model catalog: {escape(str(exc))}")
             self._wizard_step = 6
@@ -879,7 +976,7 @@ class LMAgentTUI(App[None]):
         lines = ["\n[bold]Step 6/6 — Models[/bold]"]
 
         if downloaded:
-            names   = "  ".join(f"[cyan]{m['id']}[/cyan]" for m in downloaded)
+            names = "  ".join(f"[cyan]{m['id']}[/cyan]" for m in downloaded)
             default = downloaded[0]["id"]
             self._wizard_data["default_model"] = default
             self._wizard_data.setdefault("models_to_download", [])
@@ -917,7 +1014,9 @@ class LMAgentTUI(App[None]):
         """Return up to 4 representative models not yet downloaded."""
         priorities = [
             lambda m: "tiny" in m.get("tags", []) and "general" in m.get("tags", []),
-            lambda m: "general" in m.get("tags", []) and "tiny" not in m.get("tags", []),
+            lambda m: (
+                "general" in m.get("tags", []) and "tiny" not in m.get("tags", [])
+            ),
             lambda m: "reasoning" in m.get("tags", []),
             lambda m: "code" in m.get("tags", []) and "large" not in m.get("tags", []),
         ]
@@ -932,13 +1031,13 @@ class LMAgentTUI(App[None]):
         return picks[:4]
 
     async def _wizard_show_confirm(self) -> None:
-        routing   = self._wizard_data.get("routing", "local")
-        backend   = self._wizard_data.get("backend", "cpu")
-        idle      = self._wizard_data.get("idle_unload", 0)
-        language  = self._wizard_data.get("language", "English")
+        routing = self._wizard_data.get("routing", "local")
+        backend = self._wizard_data.get("backend", "cpu")
+        idle = self._wizard_data.get("idle_unload", 0)
+        language = self._wizard_data.get("language", "English")
         interests = self._wizard_data.get("interests", "general")
-        to_dl     = self._wizard_data.get("models_to_download", [])
-        default   = self._wizard_data.get("default_model", "")
+        to_dl = self._wizard_data.get("models_to_download", [])
+        default = self._wizard_data.get("default_model", "")
 
         lines = ["\n[bold]Confirm setup:[/bold]"]
         lines.append(f"  Routing:   [cyan]{routing}[/cyan]")
@@ -955,23 +1054,26 @@ class LMAgentTUI(App[None]):
         if default:
             lines.append(f"  Default:   [cyan]{default}[/cyan]")
         lines.append("")
-        lines.append("  [yellow]>[/yellow]  [bold]Enter[/bold] = apply   [bold]n[/bold] = cancel")
+        lines.append(
+            "  [yellow]>[/yellow]  [bold]Enter[/bold] = apply   [bold]n[/bold] = cancel"
+        )
         self._write_system("\n".join(lines))
 
     async def _apply_wizard(self) -> None:
         """Write config.yaml + .env + preferences.md, then trigger downloads."""
         import yaml
 
-        routing       = self._wizard_data.get("routing", "local")
-        backend       = self._wizard_data.get("backend", "cpu")
-        idle_unload   = self._wizard_data.get("idle_unload", 0)
-        language      = self._wizard_data.get("language", "English")
-        interests     = self._wizard_data.get("interests", "general")
-        to_dl         = self._wizard_data.get("models_to_download", [])
+        routing = self._wizard_data.get("routing", "local")
+        backend = self._wizard_data.get("backend", "cpu")
+        idle_unload = self._wizard_data.get("idle_unload", 0)
+        language = self._wizard_data.get("language", "English")
+        interests = self._wizard_data.get("interests", "general")
+        to_dl = self._wizard_data.get("models_to_download", [])
         default_model = self._wizard_data.get("default_model", "")
 
         # Update config.yaml
         from core.config import CONFIG_PATH
+
         try:
             with CONFIG_PATH.open() as f:
                 raw = yaml.safe_load(f) or {}
@@ -1018,7 +1120,9 @@ class LMAgentTUI(App[None]):
         if routing in ("local", "auto"):
             asyncio.create_task(self._wizard_download_server(backend, to_dl))
 
-    async def _wizard_download_server(self, backend: str, models_to_dl: list[str]) -> None:
+    async def _wizard_download_server(
+        self, backend: str, models_to_dl: list[str]
+    ) -> None:
         """Download llama-server binary then kick off model downloads."""
         from core.runtime.llama_manager import SERVER_BINARY, download_llama_server
 
@@ -1048,7 +1152,9 @@ class LMAgentTUI(App[None]):
             asyncio.create_task(self._download_and_reload(model_id))
 
         if not models_to_dl:
-            self._write_system("[green]llama-server ready — no models to download.[/green]")
+            self._write_system(
+                "[green]llama-server ready — no models to download.[/green]"
+            )
 
     # ── Model download + hot-reload ───────────────────────────────────────────
 
@@ -1076,9 +1182,9 @@ class LMAgentTUI(App[None]):
             if now - _last_dl_t[0] < 5.0:
                 return
             _last_dl_t[0] = now
-            mb_done  = received / 1024 / 1024
+            mb_done = received / 1024 / 1024
             mb_total = total / 1024 / 1024 if total > 0 else 0
-            pct      = int(received * 100 / total) if total > 0 else 0
+            pct = int(received * 100 / total) if total > 0 else 0
             self._write_system(
                 f"  [dim]{pct}%  {mb_done:.0f} / {mb_total:.0f} MB[/dim]"
             )
@@ -1115,9 +1221,15 @@ class LMAgentTUI(App[None]):
         self._write_system("[yellow]Restarting daemon…[/yellow]")
         try:
             async with websockets.connect(uri, open_timeout=5) as ws:
-                await ws.send(json.dumps({
-                    "jsonrpc": "2.0", "method": "daemon.restart", "id": "restart",
-                }))
+                await ws.send(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "daemon.restart",
+                            "id": "restart",
+                        }
+                    )
+                )
                 await asyncio.wait_for(ws.recv(), timeout=5)
         except Exception:
             pass  # daemon closes the connection as it restarts — that's fine
@@ -1127,7 +1239,9 @@ class LMAgentTUI(App[None]):
             await asyncio.sleep(0.5)
             try:
                 async with websockets.connect(uri, open_timeout=1) as ws:
-                    await ws.send(json.dumps({"jsonrpc": "2.0", "method": "poll", "id": "ping"}))
+                    await ws.send(
+                        json.dumps({"jsonrpc": "2.0", "method": "poll", "id": "ping"})
+                    )
                     await asyncio.wait_for(ws.recv(), timeout=2)
                 self._write_system("[green]Daemon ready.[/green]")
                 return
@@ -1140,12 +1254,16 @@ class LMAgentTUI(App[None]):
         """Send model.reload IPC to the daemon and wait for confirmation."""
         uri = f"ws://127.0.0.1:{self._config.daemon.port}"
         async with websockets.connect(uri, open_timeout=10) as ws:
-            await ws.send(json.dumps({
-                "jsonrpc": "2.0",
-                "method": "model.reload",
-                "params": {"model_id": model_id},
-                "id": str(uuid.uuid4()),
-            }))
+            await ws.send(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "model.reload",
+                        "params": {"model_id": model_id},
+                        "id": str(uuid.uuid4()),
+                    }
+                )
+            )
             # llama-server startup can take up to 60 s
             raw = await asyncio.wait_for(ws.recv(), timeout=120)
             data = json.loads(str(raw))
@@ -1186,14 +1304,14 @@ class LMAgentTUI(App[None]):
 
     async def _handle_persona_setup_event(self, evt: dict, ws: Any) -> None:
         """Handle persona_setup_required — show mini-wizard, block input until done."""
-        persona      = evt.get("persona", "?")
-        default_loc  = evt.get("default_model", "")
-        cloud_equiv  = evt.get("cloud_equivalent", "")
+        persona = evt.get("persona", "?")
+        default_loc = evt.get("default_model", "")
+        cloud_equiv = evt.get("cloud_equivalent", "")
         assistant_model = self._model_override or _active_model(self._config)
 
-        self._setup_persona        = persona
+        self._setup_persona = persona
         self._setup_assistant_model = assistant_model
-        self._stream_ws            = ws
+        self._stream_ws = ws
 
         # Build numbered model list
         options: list[str] = []
@@ -1201,6 +1319,7 @@ class LMAgentTUI(App[None]):
         _needs_download: set[str] = set()
         try:
             from core.runtime.model_manager import list_downloaded_models
+
             downloaded_ids = {m["id"] for m in list_downloaded_models()}
         except Exception:
             downloaded_ids = set()
@@ -1218,9 +1337,9 @@ class LMAgentTUI(App[None]):
         if cloud_equiv and cloud_equiv not in options:
             options.append(cloud_equiv)
 
-        self._setup_model_list    = options
+        self._setup_model_list = options
         self._setup_needs_download = _needs_download
-        self._setup_active        = True
+        self._setup_active = True
 
         # Display the mini-wizard
         lines = [
@@ -1249,11 +1368,11 @@ class LMAgentTUI(App[None]):
 
     async def _confirm_persona_model(self, text: str) -> None:
         """Resolve user's model choice and send persona.model.confirm to daemon."""
-        persona         = self._setup_persona
-        options         = self._setup_model_list
-        needs_download  = self._setup_needs_download
+        persona = self._setup_persona
+        options = self._setup_model_list
+        needs_download = self._setup_needs_download
         assistant_model = self._setup_assistant_model
-        ws              = self._stream_ws
+        ws = self._stream_ws
 
         self._setup_active = False
 
@@ -1281,8 +1400,24 @@ class LMAgentTUI(App[None]):
                 f"[yellow]Downloading [cyan]{escape(model_id)}[/cyan] for @{escape(persona)}…[/yellow]"
             )
             try:
-                await self._send_model_reload(model_id)
+                # Get model info from catalog for download
+                from core.runtime.model_manager import _load_catalog
+
+                catalog = {m["id"]: m for m in _load_catalog()}
+                m = catalog.get(model_id)
+                if not m:
+                    raise RuntimeError(f"Model {model_id} not found in catalog")
+
+                # Download the model
+                await _download_model_httpx(
+                    m["hf_repo"],
+                    m["hf_file"],
+                    MODELS_DIR / model_id,
+                )
                 self._write_system(f"[green]Download complete.[/green]")
+
+                # Now load it
+                await self._send_model_reload(model_id)
             except Exception as exc:
                 self._write_error(
                     f"Download failed: {escape(str(exc))} — falling back to @assistant model."
@@ -1298,12 +1433,16 @@ class LMAgentTUI(App[None]):
         # Send confirmation to daemon so the blocked call_agent can continue
         if ws is not None:
             try:
-                await ws.send(json.dumps({
-                    "jsonrpc": "2.0",
-                    "method": "persona.model.confirm",
-                    "params": {"persona": persona, "model_id": model_id},
-                    "id": str(uuid.uuid4()),
-                }))
+                await ws.send(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "persona.model.confirm",
+                            "params": {"persona": persona, "model_id": model_id},
+                            "id": str(uuid.uuid4()),
+                        }
+                    )
+                )
             except Exception as exc:
                 self._write_error(f"Could not confirm model: {escape(str(exc))}")
 
@@ -1314,7 +1453,9 @@ class LMAgentTUI(App[None]):
         # If the change was caused by arrow/tab fill, text will be one of the known
         # completions — recompute from _completion_base to preserve the full list.
         if self._completion_matches and text in self._completion_matches:
-            matches = [c for c in SLASH_COMMANDS if c.startswith(self._completion_base.lower())]
+            matches = [
+                c for c in SLASH_COMMANDS if c.startswith(self._completion_base.lower())
+            ]
             if matches:
                 self._completion_matches = matches
                 self._render_completions()
@@ -1357,18 +1498,24 @@ class LMAgentTUI(App[None]):
             return
         if event.key == "down":
             event.prevent_default()
-            self._completion_idx = (self._completion_idx + 1) % len(self._completion_matches)
+            self._completion_idx = (self._completion_idx + 1) % len(
+                self._completion_matches
+            )
             self._apply_completion(self._completion_idx)
         elif event.key == "up":
             event.prevent_default()
-            self._completion_idx = (self._completion_idx - 1) % len(self._completion_matches)
+            self._completion_idx = (self._completion_idx - 1) % len(
+                self._completion_matches
+            )
             self._apply_completion(self._completion_idx)
 
     def action_complete_next(self) -> None:
         """Tab → advance to next completion (or do nothing if no completions)."""
         if not self._completion_matches:
             return
-        self._completion_idx = (self._completion_idx + 1) % len(self._completion_matches)
+        self._completion_idx = (self._completion_idx + 1) % len(
+            self._completion_matches
+        )
         self._apply_completion(self._completion_idx)
 
     def _do_reload(self) -> None:
@@ -1404,9 +1551,10 @@ class LMAgentTUI(App[None]):
         self._write_user(message)
         self._streaming = True
         self._update_subtitle("thinking…")
-        self._ws_task = asyncio.create_task(self._run_chat(message))
+        active_agent = self._active_tab_persona()
+        self._ws_task = asyncio.create_task(self._run_chat(message, active_agent))
 
-    async def _run_chat(self, message: str) -> None:
+    async def _run_chat(self, message: str, agent_id: str) -> None:
         """Stream a chat request from the daemon.
 
         Cancellation: CancelledError is raised at the next WebSocket await.
@@ -1416,20 +1564,22 @@ class LMAgentTUI(App[None]):
         uri = f"ws://127.0.0.1:{self._config.daemon.port}"
         try:
             async with websockets.connect(uri, open_timeout=5) as ws:
-                self._stream_ws = ws          # expose for mid-stream sends
+                self._stream_ws = ws  # expose for mid-stream sends
                 params: dict = {
                     "message": message,
-                    "agent_id": self._persona,
+                    "agent_id": self._active_tab_persona(),
                     "persona_models": self._persona_models,
                 }
                 if self._model_override:
                     params["model_id"] = self._model_override
-                payload = json.dumps({
-                    "jsonrpc": "2.0",
-                    "method":  "chat",
-                    "params":  params,
-                    "id":      str(uuid.uuid4()),
-                })
+                payload = json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "chat",
+                        "params": params,
+                        "id": str(uuid.uuid4()),
+                    }
+                )
                 await ws.send(payload)
 
                 pending_text: list[str] = []
@@ -1439,7 +1589,7 @@ class LMAgentTUI(App[None]):
                     data: dict[str, Any] = json.loads(str(raw))
 
                     if data.get("method") == "chat.event":
-                        evt   = data["params"]
+                        evt = data["params"]
                         etype = evt.get("type")
 
                         if etype == "status":
@@ -1490,7 +1640,7 @@ class LMAgentTUI(App[None]):
                             if pending_text:
                                 self._write_assistant("".join(pending_text))
                                 pending_text = []
-                            tool_name  = evt.get("name", "?")
+                            tool_name = evt.get("name", "?")
                             tool_input = evt.get("input", {})
                             self._write_tool_call(tool_name, tool_input)
                             # Multi-agent: open tab for delegated agent
@@ -1503,13 +1653,13 @@ class LMAgentTUI(App[None]):
 
                         elif etype == "tool_result":
                             tool_name = evt.get("name", "?")
-                            output    = evt.get("output", {})
+                            output = evt.get("output", {})
                             self._write_tool_result(tool_name, output)
                             # Multi-agent: write sub-agent output to its tab
                             if tool_name == "call_agent" and isinstance(output, dict):
-                                sub        = output.get("agent") or _last_sub_agent or ""
-                                agent_out  = output.get("output") or ""
-                                errors     = output.get("errors") or []
+                                sub = output.get("agent") or _last_sub_agent or ""
+                                agent_out = output.get("output") or ""
+                                errors = output.get("errors") or []
                                 if sub:
                                     log = self._chat(sub)
                                     if agent_out:
@@ -1517,8 +1667,12 @@ class LMAgentTUI(App[None]):
                                             f"[bold green]@{sub}[/bold green]: "
                                             f"{escape(str(agent_out))}"
                                         )
-                                    for err in (errors if isinstance(errors, list) else []):
-                                        log.write(f"[bold red]✗[/bold red] {escape(str(err))}")
+                                    for err in (
+                                        errors if isinstance(errors, list) else []
+                                    ):
+                                        log.write(
+                                            f"[bold red]✗[/bold red] {escape(str(err))}"
+                                        )
                                 # Return focus to main agent tab
                                 self._switch_to_agent_tab(self._persona)
                                 _last_sub_agent = None
@@ -1564,16 +1718,41 @@ class LMAgentTUI(App[None]):
         if self.query(f"#{tab_id}"):
             return
         tc = self.query_one("#agent-tabs", TabbedContent)
-        tc.add_pane(TabPane(
-            f"@{agent_name}",
-            RichLog(markup=True, highlight=False, wrap=True, id=f"chat-{agent_name}"),
-            id=tab_id,
-        ))
+        tc.add_pane(
+            TabPane(
+                f"@{agent_name}",
+                RichLog(
+                    markup=True, highlight=False, wrap=True, id=f"chat-{agent_name}"
+                ),
+                id=tab_id,
+            )
+        )
 
     def _switch_to_agent_tab(self, agent_name: str) -> None:
         """Activate the tab for agent_name (creates it first if needed)."""
         self._ensure_agent_tab(agent_name)
         self.query_one("#agent-tabs", TabbedContent).active = f"tab-{agent_name}"
+
+    def _close_agent_tab(self, agent_name: str) -> None:
+        """Close the tab for agent_name (unless it's the last one or @assistant)."""
+        if agent_name == "assistant":
+            self._write_system("[dim]Cannot close @assistant tab.[/dim]")
+            return
+        tab_id = f"tab-{agent_name}"
+        try:
+            tab = self.query_one(f"#{tab_id}", TabPane)
+        except Exception:
+            self._write_system(f"[dim]No tab open for @{agent_name}.[/dim]")
+            return
+        tc = self.query_one("#agent-tabs", TabbedContent)
+        tc.remove_pane(tab_id)
+        self._write_system(f"[dim]Closed @{agent_name} tab.[/dim]")
+
+        try:
+            if tc.active != "tab-assistant":
+                tc.active = "tab-assistant"
+        except Exception:
+            pass
 
     # ── Rendering helpers ──────────────────────────────────────────────────────
 
@@ -1606,10 +1785,11 @@ class LMAgentTUI(App[None]):
             return self._persona
 
     def _write_user(self, text: str) -> None:
-        self._chat().write(f"\n[bold blue]You[/bold blue]: {escape(text)}")
+        self._active_chat().write(f"\n[bold blue]You[/bold blue]: {escape(text)}")
 
     def _write_assistant(self, text: str) -> None:
-        self._chat().write(f"[bold green]@{self._persona}[/bold green]: {escape(text)}")
+        active = self._active_tab_persona()
+        self._active_chat().write(f"[bold green]@{active}[/bold green]: {escape(text)}")
 
     def _write_tool_call(self, name: str, input_: dict) -> None:
         try:
@@ -1617,20 +1797,19 @@ class LMAgentTUI(App[None]):
         except Exception:
             body = str(input_)
         indented = body.replace("\n", "\n    ")
-        self._chat().write(
+        self._active_chat().write(
             f"  [dim]▶ tool [bold]{escape(name)}[/bold][/dim]\n"
             f"  [dim]  {escape(indented)}[/dim]"
         )
 
     def _write_tool_result(self, name: str, output: dict) -> None:
-        body  = format_tool_result(name, output)
+        body = format_tool_result(name, output)
         # Detect actual errors: output dict has a non-empty "error" key, or body starts with "error:"
         has_error = (
-            (isinstance(output, dict) and output.get("error"))
-            or body.startswith("error:")
-        )
+            isinstance(output, dict) and output.get("error")
+        ) or body.startswith("error:")
         color = "red" if has_error else "dim"
-        self._chat().write(
+        self._active_chat().write(
             f"  [{color}]◀ result [bold]{escape(name)}[/bold]: {escape(body)}[/{color}]"
         )
 
@@ -1651,7 +1830,7 @@ class LMAgentTUI(App[None]):
     # ── Info commands ──────────────────────────────────────────────────────────
 
     def _show_models(self) -> None:
-        cloud       = self._config.backends.cloud
+        cloud = self._config.backends.cloud
         local_default = self._config.backends.local.default_model
         lines: list[str] = ["[bold]Available models:[/bold]", ""]
 
@@ -1663,14 +1842,15 @@ class LMAgentTUI(App[None]):
         lines.append("[dim]Local catalog:[/dim]")
         try:
             from core.runtime.model_manager import _load_catalog, list_downloaded_models
+
             downloaded = {m["id"] for m in list_downloaded_models()}
-            active     = local_default or ""
+            active = local_default or ""
             for m in _load_catalog():
-                mid      = m["id"]
-                status   = "[green]✓[/green]" if mid in downloaded else "[dim]·[/dim]"
+                mid = m["id"]
+                status = "[green]✓[/green]" if mid in downloaded else "[dim]·[/dim]"
                 is_active = " [yellow]← active[/yellow]" if mid == active else ""
-                tags     = ", ".join(m.get("tags", []))
-                size     = f"{m.get('size_gb', '?')} GB"
+                tags = ", ".join(m.get("tags", []))
+                size = f"{m.get('size_gb', '?')} GB"
                 lines.append(
                     f"  {status} [cyan]{mid}[/cyan]{is_active}\n"
                     f"       {escape(m.get('description', ''))}"
@@ -1688,7 +1868,11 @@ class LMAgentTUI(App[None]):
 
     def _show_persona_info(self) -> None:
         try:
-            from core.persona_loader import load_persona, list_personas as _list_personas
+            from core.persona_loader import (
+                load_persona,
+                list_personas as _list_personas,
+            )
+
             p = load_persona(self._persona)
             active_model = self._model_override or _active_model(self._config)
 
@@ -1699,8 +1883,11 @@ class LMAgentTUI(App[None]):
 
             # Show actual memory files with sizes
             global_dir = _USER_DIR / "memory" / "global"
-            agent_dir  = _USER_DIR / "memory" / "agents" / self._persona
-            for label, dir_path in [("global memory", global_dir), (f"persona memory ({self._persona})", agent_dir)]:
+            agent_dir = _USER_DIR / "memory" / "agents" / self._persona
+            for label, dir_path in [
+                ("global memory", global_dir),
+                (f"persona memory ({self._persona})", agent_dir),
+            ]:
                 if dir_path.exists():
                     files = sorted(dir_path.glob("*.md"))
                     if files:
@@ -1728,12 +1915,22 @@ class LMAgentTUI(App[None]):
             from core.tools.bash import make_bash_tool
             from core.tools.file_ops import make_file_ops_tools
             from core.tools.git import GIT_CLONE_TOOL, GIT_STATUS_TOOL, GIT_LOG_TOOL
+
             registry = ToolRegistry()
-            read_tool, write_tool, list_tool = make_file_ops_tools(self._config.security)
-            for t in [make_bash_tool(self._config.security), read_tool, write_tool,
-                      list_tool, GIT_CLONE_TOOL, GIT_STATUS_TOOL, GIT_LOG_TOOL]:
+            read_tool, write_tool, list_tool = make_file_ops_tools(
+                self._config.security
+            )
+            for t in [
+                make_bash_tool(self._config.security),
+                read_tool,
+                write_tool,
+                list_tool,
+                GIT_CLONE_TOOL,
+                GIT_STATUS_TOOL,
+                GIT_LOG_TOOL,
+            ]:
                 registry.register(t)
-            p        = load_persona(self._persona)
+            p = load_persona(self._persona)
             tools_str = get_tools_list_str(p, registry)
             self._write_system(f"[bold]Tools (@{self._persona}):[/bold]\n{tools_str}")
         except Exception as exc:
@@ -1756,6 +1953,7 @@ class LMAgentTUI(App[None]):
     def action_real_command_palette(self) -> None:
         """Ctrl+P → vraie command palette Textual."""
         from textual.command import CommandPalette
+
         if not CommandPalette.is_open(self):
             self.push_screen(CommandPalette())
 
@@ -1777,9 +1975,7 @@ class LMAgentTUI(App[None]):
                     model = self._persona_models[name]
                 else:
                     model = (
-                        p.get("cloud_equivalent")
-                        or p.get("default_model")
-                        or "default"
+                        p.get("cloud_equivalent") or p.get("default_model") or "default"
                     )
             except Exception:
                 desc, model = "", "default"
@@ -1789,24 +1985,31 @@ class LMAgentTUI(App[None]):
         personas_info.sort(key=lambda x: (0 if x[0] == self._persona else 1, x[0]))
 
         existing_tabs: set[str] = {
-            tp.id.removeprefix("tab-")
-            for tp in self.query("TabPane")
-            if tp.id
+            tp.id.removeprefix("tab-") for tp in self.query("TabPane") if tp.id
         }
+        try:
+            active_tab = self.query_one("#agent-tabs", TabbedContent).active
+            current_active = active_tab.removeprefix("tab-")
+        except Exception:
+            current_active = self._persona
 
         def _handle(result: tuple[str, str] | None) -> None:
             if result is None:
                 return
             action, persona = result
-            self._ensure_agent_tab(persona)
-            self._switch_to_agent_tab(persona)
-            if action == "new":
-                self._chat(persona).clear()
-                self._write_system(
-                    f"[dim]New conversation — @{persona}[/dim]"
-                )
+            current_tabs: set[str] = {
+                tp.id.removeprefix("tab-") for tp in self.query("TabPane") if tp.id
+            }
+            if action == "close":
+                self._close_agent_tab(persona)
+            else:
+                self._ensure_agent_tab(persona)
+                self._switch_to_agent_tab(persona)
+                if action == "new":
+                    self._chat(persona).clear()
+                    self._write_system(f"[dim]New conversation — @{persona}[/dim]")
 
         self.push_screen(
-            PersonaPickerScreen(personas_info, existing_tabs, self._persona),
+            PersonaPickerScreen(personas_info, existing_tabs, current_active),
             _handle,
         )

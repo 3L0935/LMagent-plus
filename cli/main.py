@@ -356,7 +356,7 @@ class LMAgentTUI(App[None]):
         yield Static("", id="completions", markup=True)
         yield Static("", id="streaming-preview", markup=True)
         yield Input(placeholder="Type a message or /help…", id="input")
-        yield Footer()
+        yield Footer(show_command_palette=False)
 
     def on_mount(self) -> None:
         from textual.widgets._header import HeaderIcon

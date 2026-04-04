@@ -247,6 +247,7 @@ Scope: no new features — only fixes, hardening, and missing quality-of-life im
 - [x] Fix orphan llama-server — on daemon restart, `LocalBackendManager._proc = None` even if a previous llama-server is still running on the port; `_proc.poll()` returned non-None (dead new process), so `is_loaded = False` every message; fix: `_kill_orphan()` in `_start_sync` kills any process on the configured port matching our binary via `fuser` + `/proc/<pid>/cmdline`
 - [x] Fix false-positive red in `_write_tool_result` — `"error" in body` was True for all `call_agent` results (JSON contains `"errors"` key); replaced with `output.get("error")` check on the actual dict
 - [x] Robustness: `errors`/`agent_out` in tool_result handler made defensive against None/unexpected types
+- [x] Fix footer command palette button — `Footer` has a built-in command palette button docked right (`.-command-palette` CSS class) that calls `action_command_palette` (→ persona picker); fixed with `Footer(show_command_palette=False)`
 
 **Exit criterion:** User can call `@coder` from `@assistant`, get the pre-call model setup wizard on first call, select a model (with auto-download if needed), and have the choice persist for future calls. Persona picker opens on header icon click. Ctrl+P opens Textual command palette. No "loading/loaded" spam after daemon restart.
 

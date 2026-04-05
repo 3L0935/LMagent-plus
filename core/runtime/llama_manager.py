@@ -37,20 +37,20 @@ LLAMA_RELEASES_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases/l
 BINARY_PATTERNS: dict[tuple[str, str], str] = {
     # ── Linux — patterns valid as of llama.cpp b8611 ──
     # cpu/cuda: llama-*-bin-ubuntu-x64.tar.gz
-    ("linux", "cuda"):   "llama-*-bin-ubuntu-x64.*",
+    ("linux", "cuda"): "llama-*-bin-ubuntu-x64.*",
     # rocm:    llama-*-bin-ubuntu-rocm-7.2-x64.tar.gz
-    ("linux", "rocm"):   "llama-*-bin-ubuntu-rocm-*-x64.*",
+    ("linux", "rocm"): "llama-*-bin-ubuntu-rocm-*-x64.*",
     # vulkan:  llama-*-bin-ubuntu-vulkan-x64.tar.gz
     ("linux", "vulkan"): "llama-*-bin-ubuntu-vulkan-x64.*",
-    ("linux", "cpu"):    "llama-*-bin-ubuntu-x64.*",
+    ("linux", "cpu"): "llama-*-bin-ubuntu-x64.*",
     # ── Windows ──
-    ("windows", "cuda"):   "llama-*-bin-win-cuda-*-x64.*",
+    ("windows", "cuda"): "llama-*-bin-win-cuda-*-x64.*",
     ("windows", "vulkan"): "llama-*-bin-win-vulkan-x64.*",
     # win-cpu-x64 replaced win-noavx-x64
-    ("windows", "cpu"):    "llama-*-bin-win-cpu-x64.*",
+    ("windows", "cpu"): "llama-*-bin-win-cpu-x64.*",
     # ── macOS ──
     ("darwin", "metal"): "llama-*-bin-macos-arm64.*",
-    ("darwin", "cpu"):   "llama-*-bin-macos-x64.*",
+    ("darwin", "cpu"): "llama-*-bin-macos-x64.*",
 }
 
 BIN_DIR = Path.home() / ".lmagent-plus" / "bin"
@@ -152,7 +152,7 @@ async def download_llama_server(
     # Extract binaries and shared libraries required at runtime.
     # Binaries: llama-server, llama-cli (and .exe variants for Windows)
     # Shared libs: all .so* / .dylib files — llama-server links them at load time
-    _BIN_TARGETS  = {"llama-server", "llama-server.exe", "llama-cli", "llama-cli.exe"}
+    _BIN_TARGETS = {"llama-server", "llama-server.exe", "llama-cli", "llama-cli.exe"}
 
     def _should_extract(filename: str) -> bool:
         if filename in _BIN_TARGETS:
@@ -268,7 +268,9 @@ def start_server(
     existing = env.get("LD_LIBRARY_PATH", "")
     bin_dir_str = str(BIN_DIR)
     if bin_dir_str not in existing.split(":"):
-        env["LD_LIBRARY_PATH"] = f"{bin_dir_str}:{existing}" if existing else bin_dir_str
+        env["LD_LIBRARY_PATH"] = (
+            f"{bin_dir_str}:{existing}" if existing else bin_dir_str
+        )
 
     # Select the correct Vulkan device when multiple GPUs are present.
     # Without this, llama.cpp defaults to device 0 which may be the integrated GPU.
@@ -354,14 +356,15 @@ class LocalBackendManager:
             RuntimeError: Server did not become ready in time.
         """
         if not SERVER_BINARY.exists():
-            log.info("llama-server binary not found — downloading for backend=%s…",
-                     self._config.backends.local.backend)
+            log.info(
+                "llama-server binary not found — downloading for backend=%s…",
+                self._config.backends.local.backend,
+            )
             await download_llama_server(self._config.backends.local.backend)
 
         async with self._lock:
             if self._proc is not None and self._proc.poll() is None:
                 if self._loaded_model == model_path:
-                    self._last_used = time.monotonic()
                     return
                 # Different model — stop current server before restarting.
                 loop = asyncio.get_running_loop()
@@ -369,7 +372,6 @@ class LocalBackendManager:
 
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self._start_sync, model_path)
-            self._last_used = time.monotonic()
             self._ensure_idle_watcher()
 
     async def ensure_loaded_from_config(self) -> None:
@@ -422,7 +424,9 @@ class LocalBackendManager:
             return
         if self._idle_task is not None and not self._idle_task.done():
             return
-        self._idle_task = asyncio.get_event_loop().create_task(self._idle_watcher(timeout))
+        self._idle_task = asyncio.get_event_loop().create_task(
+            self._idle_watcher(timeout)
+        )
 
     def _cancel_idle_watcher(self) -> None:
         if self._idle_task is not None and not self._idle_task.done():
@@ -448,10 +452,13 @@ class LocalBackendManager:
                     return
                 idle_seconds = time.monotonic() - self._last_used
                 if idle_seconds >= timeout:
-                    model_name = self._loaded_model.name if self._loaded_model else "model"
+                    model_name = (
+                        self._loaded_model.name if self._loaded_model else "model"
+                    )
                     log.info(
                         "JIT: model idle for %.0fs (limit %ds) — unloading.",
-                        idle_seconds, timeout,
+                        idle_seconds,
+                        timeout,
                     )
                     await self.unload()
                     if self._on_unload:
@@ -464,6 +471,11 @@ class LocalBackendManager:
     def is_loaded(self) -> bool:
         """True if llama-server is currently running."""
         return self._proc is not None and self._proc.poll() is None
+
+    def mark_idle(self) -> None:
+        """Mark model as idle — resets _last_used to now, starting the idle countdown."""
+        if self.is_loaded:
+            self._last_used = time.monotonic()
 
     @property
     def loaded_model(self) -> Path | None:
@@ -482,16 +494,24 @@ class LocalBackendManager:
         try:
             result = subprocess.run(
                 ["fuser", f"{port}/tcp"],
-                capture_output=True, text=True, timeout=3,
+                capture_output=True,
+                text=True,
+                timeout=3,
             )
             for pid_str in result.stdout.split():
                 try:
                     pid = int(pid_str.strip())
                     try:
                         with open(f"/proc/{pid}/cmdline", "rb") as f:
-                            cmdline = f.read().replace(b"\x00", b" ").decode(errors="replace")
+                            cmdline = (
+                                f.read().replace(b"\x00", b" ").decode(errors="replace")
+                            )
                         if binary in cmdline:
-                            log.info("JIT: killing orphan llama-server (pid=%d, port=%d)", pid, port)
+                            log.info(
+                                "JIT: killing orphan llama-server (pid=%d, port=%d)",
+                                pid,
+                                port,
+                            )
                             os.kill(pid, signal.SIGTERM)
                             time.sleep(0.5)
                             try:

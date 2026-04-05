@@ -136,6 +136,11 @@ Input {
     margin: 0 1 0 1;
 }
 
+#input-status {
+    height: 1;
+    content-align: left middle;
+}
+
 #hint-bar {
     height: 1;
     content-align: center middle;
@@ -423,6 +428,7 @@ class LMAgentTUI(App[None]):
                 )
         yield Static("", id="completions", markup=True)
         yield Static("", id="streaming-preview", markup=True)
+        yield Static("", id="input-status", markup=True)
         yield Input(placeholder="Type a message or /help…", id="input")
         yield Static("", id="hint-bar", markup=True)
         yield Footer(show_command_palette=False)
@@ -439,12 +445,11 @@ class LMAgentTUI(App[None]):
 
         # Hint bar - right aligned at bottom
         try:
-            self.query_one("#hint-bar", Static).update(
-                f"[dim]ws://127.0.0.1:{self._config.daemon.port}[/dim]  |  "
-                "[dim]Type [bold]/help[/bold] for commands  |  [bold]/setup[/bold] to set up[/dim]"
-            )
+            self._update_hint_bar()
         except Exception:
             pass
+
+        self.set_interval(1, self._update_hint_bar)
 
         state = self._load_ui_state()
         if "theme" in state:
@@ -453,8 +458,18 @@ class LMAgentTUI(App[None]):
             self.theme = "textual-dark" if state["dark"] else "textual-light"
         if "persona_models" in state:
             self._persona_models = state["persona_models"]
-        self._update_subtitle()
         self.set_interval(5, self._poll_notifications)
+
+    def _update_hint_bar(self) -> None:
+        try:
+            status = "[yellow]▌ thinking…[/yellow]" if self._streaming else ""
+            self.query_one("#input-status", Static).update(status)
+            self.query_one("#hint-bar", Static).update(
+                f"[dim]ws://127.0.0.1:{self._config.daemon.port}[/dim]  |  "
+                "[dim]Type [bold]/help[/bold] for commands  |  [bold]/setup[/bold] to set up[/dim]"
+            )
+        except Exception:
+            pass
 
     # ── Input handling ─────────────────────────────────────────────────────────
 

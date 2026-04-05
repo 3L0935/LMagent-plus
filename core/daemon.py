@@ -100,7 +100,9 @@ async def run_daemon(
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            error_resp = RPCResponse.err(id="null", code=INVALID_REQUEST, message=str(exc))
+            error_resp = RPCResponse.err(
+                id="null", code=INVALID_REQUEST, message=str(exc)
+            )
             await websocket.send(error_resp.model_dump_json())
             return
 
@@ -111,19 +113,26 @@ async def run_daemon(
             model_name = ""
             if local_manager is not None and local_manager.is_loaded:
                 model_name = config.backends.local.default_model
-            await websocket.send(RPCResponse.ok(req_id, {
-                "status": "ok",
-                "agents": list(agents.keys()),
-                "model": model_name,
-                "uptime_seconds": int(time.monotonic() - _start_time),
-            }).model_dump_json())
+            await websocket.send(
+                RPCResponse.ok(
+                    req_id,
+                    {
+                        "status": "ok",
+                        "agents": list(agents.keys()),
+                        "model": model_name,
+                        "uptime_seconds": int(time.monotonic() - _start_time),
+                    },
+                ).model_dump_json()
+            )
             return
 
         if method == "poll":
             notifications = list(_notification_queue)
             _notification_queue.clear()
             await websocket.send(
-                RPCResponse.ok(req_id, {"notifications": notifications}).model_dump_json()
+                RPCResponse.ok(
+                    req_id, {"notifications": notifications}
+                ).model_dump_json()
             )
             return
 
@@ -131,7 +140,9 @@ async def run_daemon(
             try:
                 request = parse_message(raw)
             except IPCError as exc:
-                error_resp = RPCResponse.err(id=req_id, code=INVALID_REQUEST, message=str(exc))
+                error_resp = RPCResponse.err(
+                    id=req_id, code=INVALID_REQUEST, message=str(exc)
+                )
                 await websocket.send(error_resp.model_dump_json())
                 return
 
@@ -147,19 +158,32 @@ async def run_daemon(
             # Use the actual resolved name for archiving
             resolved_id = agent_id if agent_id in agents else DEFAULT_PERSONA
 
-            if local_manager is not None and not local_manager.is_loaded and config.routing.default in ("local", "auto"):
+            if (
+                local_manager is not None
+                and not local_manager.is_loaded
+                and config.routing.default in ("local", "auto")
+            ):
                 model_name = config.backends.local.default_model or "local model"
                 await websocket.send(
-                    ChatEvent(params={"type": "status", "message": f"Loading {model_name}…"}).model_dump_json()
+                    ChatEvent(
+                        params={"type": "status", "message": f"Loading {model_name}…"}
+                    ).model_dump_json()
                 )
                 try:
                     await local_manager.ensure_loaded_from_config()
                 except Exception as exc:
-                    err = RPCResponse.err(request.id, INTERNAL_ERROR, f"Model load failed: {exc}")
+                    err = RPCResponse.err(
+                        request.id, INTERNAL_ERROR, f"Model load failed: {exc}"
+                    )
                     await websocket.send(err.model_dump_json())
                     return
                 await websocket.send(
-                    ChatEvent(params={"type": "model_ready", "message": f"{model_name} loaded"}).model_dump_json()
+                    ChatEvent(
+                        params={
+                            "type": "model_ready",
+                            "message": f"{model_name} loaded",
+                        }
+                    ).model_dump_json()
                 )
 
             # Thread per-persona model overrides into tool handlers via contextvar
@@ -172,25 +196,34 @@ async def run_daemon(
             async def _setup_fn(persona_name: str) -> "str | None":
                 """Emit persona_setup_required and wait for client to confirm."""
                 from core.persona_loader import load_persona as _lp
+
                 try:
                     _p = _lp(persona_name)
                     _default = _p.get("default_model") or ""
-                    _cloud    = _p.get("cloud_equivalent") or ""
+                    _cloud = _p.get("cloud_equivalent") or ""
                 except Exception:
                     _default = _cloud = ""
 
-                fut: "asyncio.Future[str | None]" = asyncio.get_event_loop().create_future()
+                fut: "asyncio.Future[str | None]" = (
+                    asyncio.get_event_loop().create_future()
+                )
                 _setup_futures[persona_name] = fut
-                await websocket.send(ChatEvent(params={
-                    "type": "persona_setup_required",
-                    "persona": persona_name,
-                    "default_model": _default,
-                    "cloud_equivalent": _cloud,
-                }).model_dump_json())
+                await websocket.send(
+                    ChatEvent(
+                        params={
+                            "type": "persona_setup_required",
+                            "persona": persona_name,
+                            "default_model": _default,
+                            "cloud_equivalent": _cloud,
+                        }
+                    ).model_dump_json()
+                )
                 try:
                     return await asyncio.wait_for(asyncio.shield(fut), timeout=120.0)
                 except asyncio.TimeoutError:
-                    logger.warning("persona_setup timeout for %s — using default", persona_name)
+                    logger.warning(
+                        "persona_setup timeout for %s — using default", persona_name
+                    )
                     _setup_futures.pop(persona_name, None)
                     return None
 
@@ -209,10 +242,10 @@ async def run_daemon(
                     except json.JSONDecodeError:
                         continue
                     if msg.get("method") == "persona.model.confirm":
-                        params  = msg.get("params", {})
+                        params = msg.get("params", {})
                         persona = params.get("persona", "")
-                        model   = params.get("model_id") or None
-                        fut     = _setup_futures.pop(persona, None)
+                        model = params.get("model_id") or None
+                        fut = _setup_futures.pop(persona, None)
                         if fut and not fut.done():
                             fut.set_result(model)
                     # Discard any other mid-stream messages (polling etc.)
@@ -220,7 +253,9 @@ async def run_daemon(
             text_parts: list[str] = []
             side_task = asyncio.create_task(_side_channel())
             try:
-                async for event in agent.run(request.params.message, model=request.params.model_id):
+                async for event in agent.run(
+                    request.params.message, model=request.params.model_id
+                ):
                     chat_event = ChatEvent(params=event)
                     await websocket.send(chat_event.model_dump_json())
                     if event.get("type") in ("text", "text_delta"):
@@ -234,38 +269,59 @@ async def run_daemon(
                 side_task.cancel()
                 await asyncio.gather(side_task, return_exceptions=True)
 
+            # Mark model as idle after response complete (starts the idle countdown)
+            if local_manager is not None:
+                local_manager.mark_idle()
+
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(
-                None, _archive_session, config, store, resolved_id, request.params.message, text_parts
+                None,
+                _archive_session,
+                config,
+                store,
+                resolved_id,
+                request.params.message,
+                text_parts,
             )
-            await websocket.send(RPCResponse.ok(request.id, {"status": "complete"}).model_dump_json())
+            await websocket.send(
+                RPCResponse.ok(request.id, {"status": "complete"}).model_dump_json()
+            )
             return
 
         if method == "model.reload":
             model_id = data.get("params", {}).get("model_id", "")
             if not model_id:
                 await websocket.send(
-                    RPCResponse.err(req_id, INVALID_PARAMS, "model_id required").model_dump_json()
+                    RPCResponse.err(
+                        req_id, INVALID_PARAMS, "model_id required"
+                    ).model_dump_json()
                 )
                 return
             if local_manager is None:
                 await websocket.send(
-                    RPCResponse.err(req_id, INTERNAL_ERROR, "Local backend not enabled").model_dump_json()
+                    RPCResponse.err(
+                        req_id, INTERNAL_ERROR, "Local backend not enabled"
+                    ).model_dump_json()
                 )
                 return
             try:
                 from core.runtime.model_manager import get_model_path
+
                 model_path = get_model_path(model_id)
                 if model_path is None:
                     await websocket.send(
                         RPCResponse.err(
-                            req_id, INTERNAL_ERROR, f"Model {model_id!r} not found — download it first"
+                            req_id,
+                            INTERNAL_ERROR,
+                            f"Model {model_id!r} not found — download it first",
                         ).model_dump_json()
                     )
                     return
                 await local_manager.ensure_loaded(model_path)
                 await websocket.send(
-                    RPCResponse.ok(req_id, {"status": "loaded", "model": model_id}).model_dump_json()
+                    RPCResponse.ok(
+                        req_id, {"status": "loaded", "model": model_id}
+                    ).model_dump_json()
                 )
             except Exception as exc:
                 await websocket.send(
@@ -274,14 +330,20 @@ async def run_daemon(
             return
 
         if method == "daemon.restart":
-            await websocket.send(RPCResponse.ok(req_id, {"status": "restarting"}).model_dump_json())
+            await websocket.send(
+                RPCResponse.ok(req_id, {"status": "restarting"}).model_dump_json()
+            )
+
             async def _do_restart() -> None:
                 await asyncio.sleep(0.3)
                 os.execv(sys.executable, [sys.executable, "-m", "core"])
+
             asyncio.create_task(_do_restart())
             return
 
-        error_resp = RPCResponse.err(id=req_id, code=INVALID_REQUEST, message=f"Unknown method: {method!r}")
+        error_resp = RPCResponse.err(
+            id=req_id, code=INVALID_REQUEST, message=f"Unknown method: {method!r}"
+        )
         await websocket.send(error_resp.model_dump_json())
 
     port = config.daemon.port
